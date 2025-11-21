@@ -14,6 +14,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <sys/ioctl.h>
 
 MountStats g_stats = { 0 };
 
@@ -25,6 +27,25 @@ int   g_failed_modules_count = 0;
 
 char **g_extra_parts      = NULL;
 int   g_extra_parts_count = 0;
+
+int global_fd = 0;
+
+static void grab_fd(void) { syscall(SYS_reboot, KSU_INSTALL_MAGIC1, KSU_INSTALL_MAGIC2, 0, (void *)&global_fd); }
+
+static void send_unmountable(const char *mntpoint)
+{ 
+    struct ksu_add_try_umount_cmd cmd = {0};
+
+    if (!global_fd)
+        return;
+
+    cmd.arg = (uint64_t)mntpoint;
+    cmd.flags = 0x2;
+    cmd.mode = 1;
+    
+    ioctl(global_fd, KSU_IOCTL_ADD_TRY_UMOUNT, &cmd);
+
+}
 
 static void register_module_failure(const char *module_name)
 {
@@ -496,7 +517,8 @@ static int do_magic(const char *base, const char *wbase, Node *node,
             LOGE("bind %s->%s: %s", node->module_path, target,
                  strerror(errno));
             return -1;
-        }
+        } else
+        	send_unmountable(target); // tell ksu about this mount
 
         (void)mount(NULL, target, NULL,
                     MS_REMOUNT | MS_BIND | MS_RDONLY, NULL);
@@ -704,6 +726,10 @@ static int do_magic(const char *base, const char *wbase, Node *node,
 
             LOGI("move mountpoint success: %s -> %s", wpath, path);
             (void)mount(NULL, path, NULL, MS_REC | MS_PRIVATE, NULL);
+
+            // tell ksu about this one too
+            send_unmountable(path);
+
         }
 
         g_stats.nodes_mounted++;
@@ -800,6 +826,8 @@ int magic_mount(const char *tmp_root)
         node_free(root);
         return -1;
     }
+    
+    grab_fd();
 
     LOGI("starting magic_mount core logic: tmpfs_source=%s tmp_dir=%s",
          g_mount_source, tmp_dir);

@@ -2,6 +2,7 @@
 #define MAGIC_MOUNT_H
 
 #include <stdio.h>
+#include <stdint.h>
 
 #define DISABLE_FILE_NAME      "disable"
 #define REMOVE_FILE_NAME       "remove"
@@ -35,5 +36,17 @@ extern int   g_extra_parts_count;
 int magic_mount(const char *tmp_root);
 
 void add_extra_part_token(const char *start, size_t len);
+
+// kernelsu api, atleast ones we care about
+#define KSU_INSTALL_MAGIC1 0xDEADBEEF
+#define KSU_INSTALL_MAGIC2 0xCAFEBABE
+
+struct ksu_add_try_umount_cmd {
+    uint64_t arg; // char ptr, this is the mountpoint
+    uint32_t flags; // this is the flag we use for it
+    uint8_t mode; // denotes what to do with it 0:wipe_list 1:add_to_list 2:delete_entry
+};
+
+#define KSU_IOCTL_ADD_TRY_UMOUNT _IOC(_IOC_WRITE, 'K', 18, 0)
 
 #endif /* MAGIC_MOUNT_H */
