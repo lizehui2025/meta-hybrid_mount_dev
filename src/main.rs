@@ -106,7 +106,6 @@ fn sync_active_modules(source_dir: &Path, target_base: &Path) -> Result<()> {
         let dst = target_base.join(&id);
         
         // Only sync if source has system/vendor/etc content
-        // This optimization mimics metainstall.sh logic
         let has_content = BUILTIN_PARTITIONS.iter().any(|p| src.join(p).exists());
         
         if has_content {
@@ -119,9 +118,9 @@ fn sync_active_modules(source_dir: &Path, target_base: &Path) -> Result<()> {
     Ok(())
 }
 
-// --- Main ---
+// --- Main Logic (Wrapped) ---
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // Handle Subcommands
@@ -150,17 +149,14 @@ fn main() -> Result<()> {
     
     // Ensure clean state
     if mnt_base.exists() {
-        // Try unmount just in case it was left over
         let _ = unmount(mnt_base, UnmountFlags::DETACH);
     }
 
     let storage_mode = setup_storage(mnt_base, &img_path)?;
     
     // 2. Populate Storage (Sync from /data/adb/modules)
-    // We sync to the mounted 'mnt' directory (whether it's tmpfs or ext4)
     if let Err(e) = sync_active_modules(&config.moduledir, mnt_base) {
         log::error!("Critical: Failed to sync modules: {:#}", e);
-        // We continue, but it might be empty
     }
 
     // 3. Scan & Group (Proceeds with existing logic using 'mnt' as source)
@@ -178,7 +174,7 @@ fn main() -> Result<()> {
     }
     log::info!("Loaded {} modules from storage ({})", active_modules.len(), storage_mode);
 
-    // 4. Partition Grouping logic...
+    // 4. Partition Grouping
     let mut partition_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut magic_force_map: HashMap<String, bool> = HashMap::new();
     
@@ -206,6 +202,7 @@ fn main() -> Result<()> {
     }
 
     // 5. Execute Mounts
+    // Use robust select_temp_dir
     let tempdir = if let Some(t) = &config.tempdir { t.clone() } else { utils::select_temp_dir()? };
     let mut magic_modules: HashSet<PathBuf> = HashSet::new();
 
@@ -219,7 +216,6 @@ fn main() -> Result<()> {
                 .collect();
             
             log::info!("Mounting {} [OVERLAY] ({} layers)", target_path, overlay_paths.len());
-            // TODO: Implement upperdir/workdir logic if needed for RW support
             if let Err(e) = overlay_mount::mount_overlay(&target_path, &overlay_paths, None, None) {
                 log::error!("OverlayFS mount failed for {}: {:#}, falling back to Magic Mount", target_path, e);
                 magic_force_map.insert(part.to_string(), true);
@@ -240,7 +236,7 @@ fn main() -> Result<()> {
 
     if !magic_modules.is_empty() {
         log::info!("Starting Magic Mount Engine...");
-        utils::ensure_temp_dir(&tempdir)?;
+        utils::ensure_temp_dir(&tempdir).context(format!("Failed to create temp dir at {}", tempdir.display()))?;
         
         let module_list: Vec<PathBuf> = magic_modules.into_iter().collect();
         
@@ -269,7 +265,7 @@ fn scan_enabled_module_ids(metadata_dir: &Path) -> Result<Vec<String>> {
         let path = entry.path();
         if path.is_dir() {
             let id = entry.file_name().to_string_lossy().to_string();
-            // Skip self and system folders
+            // Ignore meta-hybrid self-directory and standard ignore files
             if id == "meta-hybrid" || id == "lost+found" { continue; }
             if path.join(defs::DISABLE_FILE_NAME).exists() || 
                path.join(defs::REMOVE_FILE_NAME).exists() || 
@@ -280,4 +276,12 @@ fn scan_enabled_module_ids(metadata_dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(ids)
+}
+
+fn main() {
+    if let Err(e) = run() {
+        log::error!("Fatal Error: {:#}", e);
+        eprintln!("Fatal Error: {:#}", e);
+        std::process::exit(1);
+    }
 }

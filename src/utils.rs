@@ -1,5 +1,5 @@
 use std::{
-    fs::{create_dir_all, remove_dir_all, remove_file, write, OpenOptions},
+    fs::{create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -144,7 +144,6 @@ pub fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() { return Ok(()); }
     ensure_dir_exists(dst)?;
 
-    // 1. Copy files
     let status = Command::new("cp")
         .arg("-af")
         .arg(format!("{}/.", src.display()))
@@ -156,15 +155,11 @@ pub fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
         bail!("Failed to sync {} to {}", src.display(), dst.display());
     }
 
-    let chcon_status = Command::new("chcon")
+    let _ = Command::new("chcon")
         .arg("-R")
         .arg("u:object_r:system_file:s0")
         .arg(dst)
         .status();
-        
-    if let Err(e) = chcon_status {
-         log::warn!("Failed to execute chcon on {}: {}", dst.display(), e);
-    }
 
     Ok(())
 }
@@ -183,6 +178,38 @@ pub fn ensure_temp_dir(temp_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Selects a suitable temporary directory for mounting.
+/// Iterates through common tmpfs locations to find a writable one.
 pub fn select_temp_dir() -> Result<PathBuf> {
-    Ok(PathBuf::from("/debug_ramdisk/meta_hybrid_work"))
+    // Candidates for the base directory.
+    // We prioritize memory-backed filesystems (tmpfs/ramfs) for stealth and speed.
+    // /data/adb/meta-hybrid is the fallback (persistent but writable).
+    let candidates = [
+        "/debug_ramdisk",
+        "/sbin",
+        "/dev",
+        "/mnt",
+        "/data/local/tmp",
+        "/data/adb/meta-hybrid"
+    ];
+
+    for base in candidates {
+        let path = Path::new(base);
+        // Must exist and be a directory
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Try to create a probe directory to verify writability
+        let probe_dir = path.join(".mm_rw_probe");
+        if create_dir(&probe_dir).is_ok() {
+            // Cleanup and select this base
+            let _ = remove_dir(&probe_dir);
+            let work_dir = path.join("meta_hybrid_work");
+            log::debug!("Selected temp dir base: {}", path.display());
+            return Ok(work_dir);
+        }
+    }
+
+    bail!("No writable temporary directory found! Checked: {:?}", candidates)
 }
