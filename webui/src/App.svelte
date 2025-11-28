@@ -4,6 +4,7 @@
   import { cubicOut, cubicIn } from 'svelte/easing';
   import { store } from './lib/store.svelte';
   import NavBar from './components/NavBar.svelte';
+  import Toast from './components/Toast.svelte';
   import StatusTab from './routes/StatusTab.svelte';
   import ConfigTab from './routes/ConfigTab.svelte';
   import ModulesTab from './routes/ModulesTab.svelte';
@@ -12,13 +13,12 @@
   import './app.css';
   import './layout.css';
   
-  // Default tab is now 'status'
+  // Default tab is 'status'
   let activeTab = $state('status');
   let transitionDirection = $state(1);
   let touchStartX = 0;
   let touchEndX = 0;
 
-  // Updated TABS array to match NavBar
   const TABS = ['status', 'config', 'modules', 'logs'];
 
   function switchTab(id) {
@@ -75,7 +75,5 @@
     {/key}
   </main>
 
-  {#if store.toast.visible}
-    <div class="msg-toast">{store.toast.text}</div>
-  {/if}
+  <Toast />
 </div>
