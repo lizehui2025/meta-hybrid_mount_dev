@@ -9,10 +9,12 @@ mod overlay_mount;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
 use config::{Config, CONFIG_FILE_DEFAULT};
 use rustix::mount::{unmount, UnmountFlags};
+use serde::Serialize;
 
 #[derive(Parser, Debug)]
 #[command(name = "meta-hybrid", version, about = "Hybrid Mount Metamodule")]
@@ -42,6 +44,19 @@ enum Commands {
     ShowConfig,
     /// Output storage usage in JSON format
     Storage,
+    /// List modules in JSON format
+    Modules,
+}
+
+#[derive(Serialize)]
+struct ModuleInfo {
+    id: String,
+    name: String,
+    version: String,
+    author: String,
+    description: String,
+    // Calculated based on config
+    mode: String,
 }
 
 const BUILTIN_PARTITIONS: &[&str] = &["system", "vendor", "product", "system_ext", "odm", "oem"];
@@ -59,6 +74,19 @@ fn load_config(cli: &Cli) -> Result<Config> {
             Ok(Config::default())
         }
     }
+}
+
+// Helper to read props like "name=Foo" from a file
+fn read_prop(path: &Path, key: &str) -> Option<String> {
+    if let Ok(file) = fs::File::open(path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if line.starts_with(key) && line.chars().nth(key.len()) == Some('=') {
+                return Some(line[key.len() + 1..].to_string());
+            }
+        }
+    }
+    None
 }
 
 // --- Smart Storage Logic ---
@@ -165,6 +193,67 @@ fn check_storage() -> Result<()> {
     Ok(())
 }
 
+fn list_modules(cli: &Cli) -> Result<()> {
+    // 1. Load config to get module dir and modes
+    let config = load_config(cli)?;
+    let module_modes = config::load_module_modes();
+    let modules_dir = config.moduledir;
+    
+    let mut modules = Vec::new();
+
+    if modules_dir.exists() {
+        for entry in fs::read_dir(&modules_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if !path.is_dir() { continue; }
+            
+            let id = entry.file_name().to_string_lossy().to_string();
+            
+            // Filters
+            if id == "meta-hybrid" || id == "lost+found" { continue; }
+            if path.join(defs::DISABLE_FILE_NAME).exists() || 
+               path.join(defs::REMOVE_FILE_NAME).exists() || 
+               path.join(defs::SKIP_MOUNT_FILE_NAME).exists() {
+                continue;
+            }
+
+            // Check content (system/vendor/etc...)
+            // We also check mnt dir in case it's only in image (legacy support)
+            let mnt_path = Path::new(defs::MODULE_CONTENT_DIR).join(&id);
+            let has_content = BUILTIN_PARTITIONS.iter().any(|p| {
+                path.join(p).exists() || mnt_path.join(p).exists()
+            });
+
+            if has_content {
+                let prop_path = path.join("module.prop");
+                let name = read_prop(&prop_path, "name").unwrap_or_else(|| id.clone());
+                let version = read_prop(&prop_path, "version").unwrap_or_default();
+                let author = read_prop(&prop_path, "author").unwrap_or_default();
+                let description = read_prop(&prop_path, "description").unwrap_or_default();
+                
+                let mode = module_modes.get(&id).cloned().unwrap_or_else(|| "auto".to_string());
+
+                modules.push(ModuleInfo {
+                    id,
+                    name,
+                    version,
+                    author,
+                    description,
+                    mode,
+                });
+            }
+        }
+    }
+
+    // Sort by name
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let json = serde_json::to_string(&modules)?;
+    println!("{}", json);
+    Ok(())
+}
+
 // --- Main Logic (Wrapped) ---
 
 fn run() -> Result<()> {
@@ -183,6 +272,10 @@ fn run() -> Result<()> {
             },
             Commands::Storage => {
                 check_storage()?;
+                return Ok(());
+            },
+            Commands::Modules => {
+                list_modules(&cli)?;
                 return Ok(());
             }
         }
