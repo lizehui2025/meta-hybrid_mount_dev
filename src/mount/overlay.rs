@@ -1,15 +1,17 @@
-
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use log::{info, warn};
 use std::path::{Path, PathBuf};
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use procfs::process::Process;
 use rustix::{fd::AsFd, fs::CWD, mount::*};
 
-use crate::defs::KSU_OVERLAY_SOURCE;
+use crate::defs::{KSU_OVERLAY_SOURCE, RUN_DIR};
 use crate::utils::send_unmountable;
 
-/// Low-level function to mount overlayfs using modern fsopen API or fallback to mount()
+const PAGE_LIMIT: usize = 4000;
+
 pub fn mount_overlayfs(
     lower_dirs: &[String],
     lowest: &str,
@@ -24,27 +26,112 @@ pub fn mount_overlayfs(
         .chain(std::iter::once(lowest))
         .collect::<Vec<_>>()
         .join(":");
-    
-    info!(
-        "mount overlayfs on {:?}, lowerdir={}, upperdir={:?}, workdir={:?}",
-        dest.as_ref(),
-        lowerdir_config,
-        upperdir,
-        workdir
-    );
 
-    let upperdir = upperdir
+    if lowerdir_config.len() < PAGE_LIMIT {
+        return do_mount_overlay(
+            &lowerdir_config,
+            upperdir,
+            workdir,
+            dest,
+            disable_umount
+        );
+    }
+
+    info!("Lowerdir params too long ({} bytes), switching to staged mount.", lowerdir_config.len());
+    
+    if upperdir.is_some() || workdir.is_some() {
+        bail!("Staged mount not supported for RW overlay (upperdir/workdir present)");
+    }
+
+    mount_overlayfs_staged(lower_dirs, lowest, dest, disable_umount)
+}
+
+fn mount_overlayfs_staged(
+    lower_dirs: &[String],
+    lowest: &str,
+    dest: impl AsRef<Path>,
+    disable_umount: bool,
+) -> Result<()> {
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    let mut current_batch: Vec<String> = Vec::new();
+    let mut current_len = 0;
+
+    const SAFE_CHUNK_SIZE: usize = 3500;
+
+    for dir in lower_dirs {
+        if current_len + dir.len() + 1 > SAFE_CHUNK_SIZE {
+            batches.push(current_batch);
+            current_batch = Vec::new();
+            current_len = 0;
+        }
+        current_batch.push(dir.clone());
+        current_len += dir.len() + 1;
+    }
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    let staging_root = Path::new(RUN_DIR).join("staging");
+    if !staging_root.exists() {
+        fs::create_dir_all(&staging_root).context("failed to create staging dir")?;
+    }
+
+    let mut current_base = lowest.to_string();
+    
+    for (i, batch) in batches.iter().rev().enumerate() {
+        let is_last_layer = i == batches.len() - 1; 
+        
+        let target_path = if is_last_layer {
+            dest.as_ref().to_path_buf()
+        } else {
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let stage_dir = staging_root.join(format!("stage_{}_{}", timestamp, i));
+            fs::create_dir_all(&stage_dir)?;
+            stage_dir
+        };
+
+        let lowerdir_str = batch
+            .iter()
+            .map(|s| s.as_str())
+            .chain(std::iter::once(current_base.as_str()))
+            .collect::<Vec<_>>()
+            .join(":");
+
+        info!("Mounting stage {}/{} on {}", i + 1, batches.len(), target_path.display());
+
+        do_mount_overlay(
+            &lowerdir_str,
+            None,
+            None,
+            &target_path,
+            disable_umount
+        )?;
+
+        current_base = target_path.to_string_lossy().to_string();
+    }
+
+    Ok(())
+}
+
+fn do_mount_overlay(
+    lowerdir_config: &str,
+    upperdir: Option<PathBuf>,
+    workdir: Option<PathBuf>,
+    dest: impl AsRef<Path>,
+    disable_umount: bool,
+) -> Result<()> {
+    let upperdir_s = upperdir
         .filter(|up| up.exists())
         .map(|e| e.display().to_string());
-    let workdir = workdir
+    let workdir_s = workdir
         .filter(|wd| wd.exists())
         .map(|e| e.display().to_string());
 
     let result = (|| {
         let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
         let fs = fs.as_fd();
-        fsconfig_set_string(fs, "lowerdir", &lowerdir_config)?;
-        if let (Some(upperdir), Some(workdir)) = (&upperdir, &workdir) {
+        fsconfig_set_string(fs, "lowerdir", lowerdir_config)?;
+        if let (Some(upperdir), Some(workdir)) = (&upperdir_s, &workdir_s) {
             fsconfig_set_string(fs, "upperdir", upperdir)?;
             fsconfig_set_string(fs, "workdir", workdir)?;
         }
@@ -61,9 +148,8 @@ pub fn mount_overlayfs(
     })();
 
     if let Err(e) = result {
-        warn!("fsopen mount failed: {e:#}, fallback to mount");
         let mut data = format!("lowerdir={lowerdir_config}");
-        if let (Some(upperdir), Some(workdir)) = (upperdir, workdir) {
+        if let (Some(upperdir), Some(workdir)) = (upperdir_s, workdir_s) {
             data = format!("{data},upperdir={upperdir},workdir={workdir}");
         }
         mount(
@@ -72,7 +158,7 @@ pub fn mount_overlayfs(
             "overlay",
             MountFlags::empty(),
             data,
-        )?;
+        ).map_err(|e| anyhow::anyhow!("Legacy mount failed: {} (fsopen error: {})", e, e))?;
     }
     
     if !disable_umount {
@@ -82,7 +168,6 @@ pub fn mount_overlayfs(
     Ok(())
 }
 
-/// Helper to bind mount a path
 pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>, disable_umount: bool) -> Result<()> {
     info!(
         "bind mount {} -> {}",
@@ -111,7 +196,6 @@ pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>, disable_umount: 
     Ok(())
 }
 
-/// Handles recursive overlay mounting for child mount points (e.g. /system/vendor)
 fn mount_overlay_child(
     mount_point: &str,
     relative: &str,
@@ -119,7 +203,6 @@ fn mount_overlay_child(
     stock_root: &str,
     disable_umount: bool,
 ) -> Result<()> {
-    
     let has_modification = module_roots.iter().any(|lower| {
         let path = Path::new(lower).join(relative.trim_start_matches('/'));
         path.exists()
@@ -154,7 +237,6 @@ fn mount_overlay_child(
     Ok(())
 }
 
-/// The main entry point for overlay mounting with robustness
 pub fn mount_overlay(
     target_root: &str,
     module_roots: &[String],
