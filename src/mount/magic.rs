@@ -54,7 +54,12 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
             if mod_part.is_dir() {
                 let node = system.children.entry(partition.to_string())
                     .or_insert_with(|| Node::new_root(partition));
-                
+                if node.file_type == NodeFileType::Symlink {
+                    log::debug!("converting symlink node '{}' to directory", partition);
+                    node.file_type = NodeFileType::Directory;
+                    node.module_path = None; 
+                }
+
                 has_file |= node.collect_module_files(&mod_part)?;
             }
         }
@@ -71,7 +76,6 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
 
             let path_of_root = Path::new("/").join(partition);
             if path_of_root.exists() {
-                // Keep in system node
             }
         }
 
