@@ -26,12 +26,11 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
     let mut root = Node::new_root("");
     let mut system = Node::new_root("system");
     let mut has_file = false;
-
-    const ROOT_PARTITIONS: [(&str, bool); 4] = [
-        ("vendor", true),
-        ("system_ext", true),
-        ("product", true),
-        ("odm", false),
+    const ROOT_PARTITIONS: [&str; 4] = [
+        "vendor",
+        "system_ext",
+        "product",
+        "odm",
     ];
 
     for path in module_paths {
@@ -49,9 +48,10 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
             has_file |= system.collect_module_files(&mod_system)?;
         }
 
-        for (partition, _) in ROOT_PARTITIONS {
+        for partition in ROOT_PARTITIONS {
             let mod_part = path.join(partition);
             if mod_part.is_dir() {
+                // Force collect into 'system' node, even if it is at module root
                 let node = system.children.entry(partition.to_string())
                     .or_insert_with(|| Node::new_root(partition));
                 
@@ -61,26 +61,8 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
     }
 
     if has_file {
-        for (partition, require_symlink) in ROOT_PARTITIONS {
-            let path_of_root = Path::new("/").join(partition);
-            let path_of_system = Path::new("/system").join(partition);
-            let is_real_directory = fs::symlink_metadata(&path_of_root)
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
-
-            if is_real_directory {
-                if !require_symlink || path_of_system.is_symlink() {
-                    let name = partition.to_string();
-                    if let Some(node) = system.children.remove(&name) {
-                        log::debug!("promoting partition '{}' to root", name);
-                        root.children.insert(name, node);
-                    }
-                }
-            }
-        }
-
         for partition in extra_partitions {
-            if ROOT_PARTITIONS.iter().any(|(p, _)| p == partition) {
+            if ROOT_PARTITIONS.contains(&partition.as_str()) {
                 continue;
             }
             if partition == "system" {
@@ -88,22 +70,9 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
             }
 
             let path_of_root = Path::new("/").join(partition);
-            let path_of_system = Path::new("/system").join(partition);
-            let require_symlink = false; 
-
-            let is_real_directory = fs::symlink_metadata(&path_of_root)
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
-
-            if is_real_directory && (!require_symlink || path_of_system.is_symlink()) {
-                let name = partition.clone();
-                if let Some(node) = system.children.remove(&name) {
-                    log::debug!("promoting extra partition '{}' to root", name);
-                    root.children.insert(name, node);
-                }
+            if path_of_root.exists() {
             }
         }
-
         root.children.insert("system".to_string(), system);
         Ok(Some(root))
     } else {
