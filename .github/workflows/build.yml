@@ -68,7 +68,7 @@ jobs:
           fi
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Meta-Hybrid-${{ env.MODULE_VERSION }}
           path: output/module_files/
