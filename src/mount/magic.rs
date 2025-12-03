@@ -68,15 +68,25 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
             }
 
             let path_of_root = Path::new("/").join(partition);
-            if !path_of_root.exists() {
-                continue;
-            }
+            let path_of_system = Path::new("/system").join(partition);
 
-            let mod_part = path.join(partition);
-            if mod_part.is_dir() {
-                let node = root.children.entry(partition.to_string())
-                    .or_insert_with(|| Node::new_root(partition));
-                has_file |= node.collect_module_files(&mod_part)?;
+            if path_of_root.is_dir() && path_of_system.is_symlink() {
+                let name = partition.clone();
+                let mod_part = path.join(partition);
+                
+                if mod_part.is_dir() {
+                    let node = root.children.entry(name)
+                        .or_insert_with(|| Node::new_root(partition));
+                    has_file |= node.collect_module_files(&mod_part)?;
+                }
+            } else if path_of_root.is_dir() {
+                let name = partition.clone();
+                let mod_part = path.join(partition);
+                if mod_part.is_dir() {
+                    let node = root.children.entry(name)
+                        .or_insert_with(|| Node::new_root(partition));
+                    has_file |= node.collect_module_files(&mod_part)?;
+                }
             }
         }
     }
@@ -95,22 +105,6 @@ fn collect_module_files(module_paths: &[PathBuf], extra_partitions: &[String]) -
 
             if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
                 let name = partition.to_string();
-                if let Some(node) = system.children.remove(&name) {
-                    root.children.insert(name, node);
-                }
-            }
-        }
-
-        for partition in extra_partitions {
-            if ROOT_PARTITIONS.contains(&partition.as_str()) || partition == "system" {
-                continue;
-            }
-
-            let path_of_root = Path::new("/").join(partition);
-            let path_of_system = Path::new("/system").join(partition);
-
-            if path_of_root.is_dir() && path_of_system.is_symlink() {
-                let name = partition.clone();
                 if let Some(node) = system.children.remove(&name) {
                     root.children.insert(name, node);
                 }
@@ -186,7 +180,6 @@ where
             if let Some(module_path) = &current.module_path {
                 mount_bind(module_path, target_path).with_context(|| {
                     if !disable_umount {
-                        // 关键修改：调用 KernelSU 的 try_umount 逻辑
                         let _ = send_unmountable(target_path);
                     }
                     format!(
@@ -352,7 +345,6 @@ where
                     log::warn!("make dir {} private: {e:#?}", path.display());
                 }
                 if !disable_umount {
-                    // 关键修改：移动挂载点后，通知 KSU 进行命名空间分离
                     let _ = send_unmountable(path);
                 }
             }
@@ -373,7 +365,11 @@ pub fn mount_partitions(
     disable_umount: bool,
 ) -> Result<()> {
     if let Some(root) = collect_module_files(module_paths, extra_partitions)? {
-        log::debug!("Magic Mount Root:\n{root:?}");
+        log::info!("[Magic Mount Tree Constructed]");
+        let tree_str = format!("{:?}", root);
+        for line in tree_str.lines() {
+            log::info!("   {}", line);
+        }
 
         let tmp_dir = tmp_path.join("workdir");
         ensure_dir_exists(&tmp_dir)?;

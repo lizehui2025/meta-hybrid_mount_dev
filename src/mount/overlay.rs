@@ -37,7 +37,7 @@ pub fn mount_overlayfs(
         );
     }
 
-    info!("Lowerdir params too long ({} bytes), switching to staged mount.", lowerdir_config.len());
+    info!("!! Lowerdir params too long ({} bytes), switching to staged mount.", lowerdir_config.len());
     
     if upperdir.is_some() || workdir.is_some() {
         bail!("Staged mount not supported for RW overlay (upperdir/workdir present)");
@@ -96,8 +96,6 @@ fn mount_overlayfs_staged(
             .chain(std::iter::once(current_base.as_str()))
             .collect::<Vec<_>>()
             .join(":");
-
-        info!("Mounting stage {}/{} on {}", i + 1, batches.len(), target_path.display());
 
         do_mount_overlay(
             &lowerdir_str,
@@ -169,11 +167,6 @@ fn do_mount_overlay(
 }
 
 pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>, disable_umount: bool) -> Result<()> {
-    info!(
-        "bind mount {} -> {}",
-        from.as_ref().display(),
-        to.as_ref().display()
-    );
     let tree = open_tree(
         CWD,
         from.as_ref(),
@@ -244,7 +237,7 @@ pub fn mount_overlay(
     upperdir: Option<PathBuf>,
     disable_umount: bool,
 ) -> Result<()> {
-    info!("Starting robust overlay mount for {target_root}");
+    // info!("Starting robust overlay mount for {target_root}");
     
     std::env::set_current_dir(target_root)
         .with_context(|| format!("failed to chdir to {target_root}"))?;

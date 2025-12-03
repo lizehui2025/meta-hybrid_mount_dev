@@ -96,10 +96,10 @@ fn run() -> Result<()> {
         log::warn!("Failed to camouflage process: {}", e);
     }
 
-    log::info!("Meta-Hybrid Mount Daemon Starting...");
+    log::info!(">> Initializing Meta-Hybrid Mount Daemon...");
 
     if config.disable_umount {
-        log::warn!("Namespace Detach (try_umount) is DISABLED.");
+        log::warn!("!! Namespace Detach (try_umount) is DISABLED via config.");
     }
 
     utils::ensure_dir_exists(defs::RUN_DIR)?;
@@ -108,32 +108,29 @@ fn run() -> Result<()> {
     let img_path = Path::new(defs::BASE_DIR).join("modules.img");
     
     let storage_handle = storage::setup(&mnt_base, &img_path, config.force_ext4)?;
+    log::info!(">> Storage Backend: [{}]", storage_handle.mode.to_uppercase());
 
     let module_list = inventory::scan(&config.moduledir, &config)?;
-    log::info!("Scanned {} active modules.", module_list.len());
+    log::info!(">> Inventory Scan: Found {} enabled modules.", module_list.len());
 
     sync::perform_sync(&module_list, &storage_handle.mount_point)?;
 
-    log::info!("Generating mount plan...");
     let plan = planner::generate(&config, &module_list, &storage_handle.mount_point)?;
-    
-    log::info!("Plan: {} OverlayFS ops, {} Magic modules", 
-        plan.overlay_ops.len(), 
-        plan.magic_module_paths.len()
-    );
+    plan.print_visuals();
 
+    log::info!(">> Link Start! Executing mount plan...");
     let exec_result = executor::execute(&plan, &config)?;
 
     let mut nuke_active = false;
     if storage_handle.mode == "ext4" && config.enable_nuke {
-        log::info!("Attempting to deploy Paw Pad (Stealth) via KernelSU...");
+        log::info!(">> Engaging Paw Pad Protocol (Stealth)...");
         match utils::ksu_nuke_sysfs(storage_handle.mount_point.to_string_lossy().as_ref()) {
             Ok(_) => {
-                log::info!("Success: Paw Pad active. Ext4 sysfs traces nuked.");
+                log::info!(">> Success: Paw Pad active. Sysfs traces purged.");
                 nuke_active = true;
             },
             Err(e) => {
-                log::warn!("Paw Pad failed (KSU ioctl error): {}", e);
+                log::warn!("!! Paw Pad failure: {}", e);
             }
         }
     }
@@ -157,13 +154,13 @@ fn run() -> Result<()> {
         log::error!("Failed to save runtime state: {}", e);
     }
 
-    log::info!("Meta-Hybrid Mount Completed.");
+    log::info!(">> System operational. Mount sequence complete.");
     Ok(())
 }
 
 fn main() {
     if let Err(e) = run() {
-        log::error!("Fatal Error: {:#}", e);
+        log::error!("!! Fatal Error: {:#}", e);
         eprintln!("Fatal Error: {:#}", e);
         std::process::exit(1);
     }

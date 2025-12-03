@@ -19,8 +19,51 @@ pub struct MountPlan {
     pub magic_module_ids: Vec<String>,
 }
 
-/// Generates a mount plan based on the inventory and current storage state.
-/// The storage_root contains the SYNCED module files.
+impl MountPlan {
+    pub fn print_visuals(&self) {
+        if self.overlay_ops.is_empty() && self.magic_module_paths.is_empty() {
+            log::info!(">> Empty plan. Standby mode.");
+            return;
+        }
+
+        if !self.overlay_ops.is_empty() {
+            log::info!("[OverlayFS Fusion Sequence]");
+            for (i, op) in self.overlay_ops.iter().enumerate() {
+                let is_last_op = i == self.overlay_ops.len() - 1 && self.magic_module_paths.is_empty();
+                let branch = if is_last_op { "╰──" } else { "├──" };
+                
+                log::info!("{} [Target] {}", branch, op.target);
+                
+                let prefix = if is_last_op { "    " } else { "│   " };
+
+                for (j, layer) in op.lowerdirs.iter().enumerate() {
+                    let is_last_layer = j == op.lowerdirs.len() - 1;
+                    let sub_branch = if is_last_layer { "╰──" } else { "├──" };
+                    
+                    let mod_name = layer.parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_else(|| "UNKNOWN".into());
+                        
+                    log::info!("{}{} [Layer] {}", prefix, sub_branch, mod_name);
+                }
+            }
+        }
+
+        if !self.magic_module_paths.is_empty() {
+            log::info!("[Magic Mount Fallback Protocol]");
+            for (i, path) in self.magic_module_paths.iter().enumerate() {
+                let is_last = i == self.magic_module_paths.len() - 1;
+                let branch = if is_last { "╰──" } else { "├──" };
+                let mod_name = path.file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_else(|| "UNKNOWN".into());
+                log::info!("{} [Bind] {}", branch, mod_name);
+            }
+        }
+    }
+}
+
 pub fn generate(
     config: &config::Config, 
     modules: &[Module], 
@@ -40,7 +83,6 @@ pub fn generate(
         let mut content_path = storage_root.join(&module.id);
         
         if module.mode == "magic" {
-            // For magic mount, we now use the source path directly (in-place mount)
             content_path = module.source_path.clone();
 
             if has_meaningful_content(&content_path, &target_partitions) {
@@ -48,7 +90,6 @@ pub fn generate(
                 magic_ids.insert(module.id.clone());
             }
         } else {
-            // For overlayfs, we use the synced storage path
             if !content_path.exists() {
                 log::debug!("Planner: Module {} content missing in storage, skipping", module.id);
                 continue;
@@ -69,10 +110,6 @@ pub fn generate(
 
             if participates_in_overlay {
                 overlay_ids.insert(module.id.clone());
-            } else {
-                if has_meaningful_content(&content_path, &target_partitions) {
-                    // Maybe fallback or empty
-                }
             }
         }
     }
@@ -82,12 +119,7 @@ pub fn generate(
         let target_path_obj = Path::new(&initial_target_path);
         let resolved_target = if target_path_obj.is_symlink() || target_path_obj.exists() {
             match target_path_obj.canonicalize() {
-                Ok(p) => {
-                    if p != target_path_obj {
-                        log::debug!("Planner: Resolved symlink {} -> {}", initial_target_path, p.display());
-                    }
-                    p
-                },
+                Ok(p) => p,
                 Err(e) => {
                     log::warn!("Planner: Failed to resolve path {}: {}. Skipping.", initial_target_path, e);
                     continue;
