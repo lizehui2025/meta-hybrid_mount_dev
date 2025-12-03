@@ -105,9 +105,7 @@ fn collect_module_files(module_dir: &Path, extra_partitions: &[String]) -> Resul
 }
 
 fn clone_symlink<S>(src: S, dst: S) -> Result<()>
-where
-    S: AsRef<Path>,
-{
+where S: AsRef<Path> {
     let src_symlink = read_link(src.as_ref())?;
     symlink(&src_symlink, dst.as_ref())?;
     lsetfilecon(dst.as_ref(), lgetfilecon(src.as_ref())?.as_str())?;
@@ -120,10 +118,12 @@ where
     Ok(())
 }
 
-fn mount_mirror<P>(path: P, work_dir_path: P, entry: &DirEntry) -> Result<()>
-where
-    P: AsRef<Path>,
-{
+fn mount_mirror<P>(
+    path: P,
+    work_dir_path: P,
+    entry: &DirEntry,
+) -> Result<()> 
+where P: AsRef<Path>{
     let path = path.as_ref().join(entry.file_name());
     let work_dir_path = work_dir_path.as_ref().join(entry.file_name());
     let file_type = entry.file_type()?;
@@ -401,7 +401,7 @@ where
     P: AsRef<Path>,
 {
     if let Some(root) = collect_module_files(module_dir, extra_partitions)? {
-        log::debug!("collected: {root:?}");
+        log::debug!("collected: {root}");
 
         let tmp_root = tmp_path.as_ref();
         let tmp_dir = tmp_root.join("workdir");
