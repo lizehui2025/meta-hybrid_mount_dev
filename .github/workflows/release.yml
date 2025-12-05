@@ -147,7 +147,7 @@ jobs:
           mv /tmp/changelog.md changelog.md
           
           git add update.json changelog.md
-          git add module/module.prop Cargo.toml webui/src/lib/store.svelte.js
+          git add module/module.prop Cargo.toml webui/src/lib/store.svelte.ts
           
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): bump version to ${{ env.META_HYBRID_VERSION }} [skip ci]"
