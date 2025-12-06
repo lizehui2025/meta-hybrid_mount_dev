@@ -104,7 +104,7 @@ const createStore = () => {
 
   function setTheme(newTheme: 'auto' | 'light' | 'dark') {
     theme = newTheme;
-    localStorage.setItem('mm-theme', newTheme);
+    localStorage.setItem('hm-theme', newTheme);
     applyTheme();
   }
 
@@ -115,7 +115,7 @@ const createStore = () => {
         const mod: any = (localeModules as any)[path];
         loadedLocale = mod.default; 
         lang = code;
-        localStorage.setItem('mm-lang', code);
+        localStorage.setItem('hm-lang', code);
       } catch (e) {
         console.error(`Failed to load locale: ${code}`, e);
         if (code !== 'en') await setLang('en');
@@ -124,10 +124,10 @@ const createStore = () => {
   }
 
   async function init() {
-    const savedLang = localStorage.getItem('mm-lang') || 'en';
+    const savedLang = localStorage.getItem('hm-lang') || 'en';
     await setLang(savedLang);
     
-    const savedTheme = localStorage.getItem('mm-theme');
+    const savedTheme = localStorage.getItem('hm-theme');
     if (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'auto') {
         theme = savedTheme;
     } else {

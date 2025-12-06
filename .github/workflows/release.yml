@@ -82,12 +82,17 @@ jobs:
           
           echo "Bumping versions to $TAG_NAME (Code: $VERSION_CODE)..."
           
+          # Update module.prop
           sed -i "s/^version=.*/version=$TAG_NAME/" module/module.prop
           sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" module/module.prop
           
+          # Update Cargo.toml
           sed -i "0,/^version = .*/s//version = \"$CLEAN_VER\"/" Cargo.toml
           
-          sed -i "s/version: '.*',/version: '$TAG_NAME',/" webui/src/lib/store.svelte.ts
+          # Update WebUI Store (Svelte 5 Runes syntax)
+          # Matches line: let version = $state('...');
+          # We replace the whole line to inject the tag name
+          sed -i "s/let version = .*/let version = \$state('$TAG_NAME');/" webui/src/lib/store.svelte.ts
 
       - name: Build Release Package
         run: |
