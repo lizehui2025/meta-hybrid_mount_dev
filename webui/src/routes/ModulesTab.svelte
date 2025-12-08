@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import { slide } from 'svelte/transition';
   import Skeleton from '../components/Skeleton.svelte';
+  import BottomActions from '../components/BottomActions.svelte';
   import './ModulesTab.css';
 
   let searchQuery = $state('');
@@ -151,12 +152,13 @@
   </div>
 {/if}
 
-<div class="bottom-actions">
+<BottomActions>
   <button class="btn-tonal" onclick={load} disabled={store.loading.modules} title={store.L.modules.reload}>
     <svg viewBox="0 0 24 24" width="20" height="20"><path d={ICONS.refresh} fill="currentColor"/></svg>
   </button>
+  <div class="spacer"></div>
   <button class="btn-filled" onclick={save} disabled={store.saving.modules || !isDirty}>
     <svg viewBox="0 0 24 24" width="18" height="18"><path d={ICONS.save} fill="currentColor"/></svg>
     {store.saving.modules ? store.L.common.saving : store.L.modules.save}
   </button>
-</div>
+</BottomActions>

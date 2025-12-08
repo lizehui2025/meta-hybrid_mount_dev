@@ -2,6 +2,7 @@
   import { store } from '../lib/store.svelte';
   import { ICONS, DEFAULT_CONFIG } from '../lib/constants';
   import ChipInput from '../components/ChipInput.svelte';
+  import BottomActions from '../components/BottomActions.svelte';
   import { slide } from 'svelte/transition';
   import './ConfigTab.css';
 
@@ -117,7 +118,7 @@
   </div>
 </div>
 
-<div class="bottom-actions">
+<BottomActions>
   <button 
     class="btn-tonal" 
     onclick={reload}
@@ -126,8 +127,9 @@
   >
     <svg viewBox="0 0 24 24" width="20" height="20"><path d={ICONS.refresh} fill="currentColor"/></svg>
   </button>
+  <div class="spacer"></div>
   <button class="btn-filled" onclick={save} disabled={store.saving.config || !isDirty}>
     <svg viewBox="0 0 24 24" width="18" height="18"><path d={ICONS.save} fill="currentColor"/></svg>
     {store.saving.config ? store.L.common.saving : store.L.config.save}
   </button>
-</div>
+</BottomActions>

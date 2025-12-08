@@ -4,6 +4,7 @@
   import { ICONS } from '../lib/constants';
   import { BUILTIN_PARTITIONS } from '../lib/constants_gen';
   import Skeleton from '../components/Skeleton.svelte';
+  import BottomActions from '../components/BottomActions.svelte';
   import './StatusTab.css';
 
   onMount(() => {
@@ -153,7 +154,7 @@
   </div>
 </div>
 
-<div class="bottom-actions">
+<BottomActions>
   <div class="spacer"></div>
   <button 
     class="btn-tonal" 
@@ -163,4 +164,4 @@
   >
     <svg viewBox="0 0 24 24" width="20" height="20"><path d={ICONS.refresh} fill="currentColor"/></svg>
   </button>
-</div>
+</BottomActions>

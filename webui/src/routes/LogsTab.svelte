@@ -3,6 +3,7 @@
   import { ICONS } from '../lib/constants';
   import { onMount, tick, onDestroy } from 'svelte';
   import Skeleton from '../components/Skeleton.svelte';
+  import BottomActions from '../components/BottomActions.svelte';
   import './LogsTab.css';
 
   let searchLogQuery = $state('');
@@ -138,7 +139,7 @@
   {/if}
 </div>
 
-<div class="bottom-actions">
+<BottomActions>
   <button class="btn-tonal" onclick={copyLogs} disabled={filteredLogs.length === 0} title={store.L.logs.copy}>
     <svg viewBox="0 0 24 24" width="20" height="20"><path d={ICONS.copy} fill="currentColor"/></svg>
   </button>
@@ -151,4 +152,4 @@
   >
     <svg viewBox="0 0 24 24" width="20" height="20"><path d={ICONS.refresh} fill="currentColor"/></svg>
   </button>
-</div>
+</BottomActions>
