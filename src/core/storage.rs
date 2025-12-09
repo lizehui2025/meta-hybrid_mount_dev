@@ -9,6 +9,7 @@ use rustix::mount::{unmount, UnmountFlags};
 use serde::Serialize;
 
 use crate::{defs, utils, mount::hymofs::HymoFs};
+use crate::core::state::RuntimeState;
 
 const DEFAULT_SELINUX_CONTEXT: &str = "u:object_r:system_file:s0";
 const SELINUX_XATTR_KEY: &str = "security.selinux";
@@ -20,6 +21,7 @@ pub struct StorageHandle {
 
 #[derive(Serialize)]
 struct StorageStatus {
+    #[serde(rename = "type")]
     mode: String,
     mount_point: String,
     usage_percent: u8,
@@ -47,7 +49,6 @@ pub fn setup(mnt_base: &Path, img_path: &Path, force_ext4: bool) -> Result<Stora
 }
 
 fn try_setup_tmpfs(target: &Path) -> Result<bool> {
-    // 使用 utils 中的通用实现
     if utils::mount_tmpfs(target).is_ok() {
         if utils::is_xattr_supported(target) {
             return Ok(true);
@@ -66,9 +67,7 @@ fn setup_ext4_image(target: &Path, img_path: &Path) -> Result<StorageHandle> {
         create_image(img_path).context("Failed to create modules.img")?;
     }
 
-    // 使用 utils 中的通用实现
     if let Err(_) = utils::mount_image(img_path, target) {
-        // utils::repair_image 返回 Result<()>, 需要转换为 bool 判断
         if utils::repair_image(img_path).is_ok() {
             utils::mount_image(img_path, target).context("Failed to mount modules.img after repair")?;
         } else {
@@ -82,7 +81,6 @@ fn setup_ext4_image(target: &Path, img_path: &Path) -> Result<StorageHandle> {
     })
 }
 
-// create_image 是 storage 特有的，保留在此
 fn create_image(path: &Path) -> Result<()> {
     let status = Command::new("truncate")
         .arg("-s").arg("2G")
@@ -99,7 +97,6 @@ fn create_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// 这是一个目前未使用的辅助函数，标记 allow dead_code 以保留它但不报错
 #[allow(dead_code)]
 pub fn finalize_storage_permissions(target: &Path) {
     if let Err(e) = rustix::fs::chmod(target, Mode::from(0o755)) {
@@ -135,15 +132,26 @@ fn set_selinux_context(path: &Path, context: &str) -> Result<()> {
 }
 
 pub fn print_status() -> Result<()> {
-    let mnt_base = Path::new(defs::FALLBACK_CONTENT_DIR);
+    let state = RuntimeState::load().ok();
+    
+    let (mnt_base, expected_mode) = if let Some(ref s) = state {
+        (s.mount_point.clone(), s.storage_mode.clone())
+    } else {
+        (PathBuf::from(defs::FALLBACK_CONTENT_DIR), "unknown".to_string())
+    };
+
     let mut mode = "unknown".to_string();
     let mut total = 0;
     let mut used = 0;
     let mut percent = 0;
 
-    if utils::is_mounted(mnt_base) {
-        if let Ok(stat) = rustix::fs::statvfs(mnt_base) {
-            mode = "active".to_string();
+    if utils::is_mounted(&mnt_base) {
+        if let Ok(stat) = rustix::fs::statvfs(&mnt_base) {
+            mode = if expected_mode != "unknown" {
+                expected_mode
+            } else {
+                "active".to_string()
+            };
 
             total = stat.f_blocks * stat.f_frsize;
             let free = stat.f_bfree * stat.f_frsize;
