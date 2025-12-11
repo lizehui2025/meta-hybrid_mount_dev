@@ -1,22 +1,16 @@
 .bottom-nav {
   display: flex;
   background-color: var(--md-sys-color-surface-container);
-  /* Remove border and shadow for a cleaner MD3 look */
   border-top: none;
   box-shadow: none; 
-  
-  /* Safe area handling for Android navigation bar */
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
   padding-top: 16px;
   padding-left: 24px;
   padding-right: 24px;
-  
   overflow-x: auto;
   flex-shrink: 0;
   -ms-overflow-style: none;
   gap: 8px;
-  
-  /* Ensure it sits above content (BottomActions has z-index 90) */
   z-index: 100;
 }
 
@@ -32,11 +26,9 @@
   align-items: center;
   justify-content: center;
   gap: 4px;
-  
   font-size: 12px;
   font-weight: 500;
   color: var(--md-sys-color-on-surface-variant);
-  
   background: transparent;
   cursor: pointer;
   border: none;
@@ -46,7 +38,7 @@
 .icon-container {
   width: 64px;
   height: 32px;
-  border-radius: 20px; /* MD3 uses fuller pills usually, or 16px is fine */
+  border-radius: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -60,10 +52,9 @@
   transition: all 0.2s;
 }
 
-/* Active State */
 .nav-tab.active .icon-container {
   background-color: var(--md-sys-color-secondary-container);
-  width: 64px; /* Ensure width stays stable */
+  width: 64px;
 }
 
 .nav-tab.active {
