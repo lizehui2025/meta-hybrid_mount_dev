@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use rayon::prelude::*;
 use crate::{defs, utils, core::inventory::{Module, MountMode}};
+
 pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
     log::info!("Starting smart module sync to {}", target_base.display());
     prune_orphaned_modules(modules, target_base)?;
@@ -39,6 +40,7 @@ pub fn perform_sync(modules: &[Module], target_base: &Path) -> Result<()> {
     });
     Ok(())
 }
+
 fn prune_orphaned_modules(modules: &[Module], target_base: &Path) -> Result<()> {
     if !target_base.exists() { return Ok(()); }
     let active_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
@@ -66,6 +68,7 @@ fn prune_orphaned_modules(modules: &[Module], target_base: &Path) -> Result<()> 
     });
     Ok(())
 }
+
 fn should_sync(src: &Path, dst: &Path) -> bool {
     if !dst.exists() {
         return true;
@@ -80,6 +83,7 @@ fn should_sync(src: &Path, dst: &Path) -> bool {
         _ => true,
     }
 }
+
 fn repair_module_contexts(module_root: &Path, module_id: &str) {
     for part in defs::BUILTIN_PARTITIONS {
         let part_root = module_root.join(part);
@@ -90,6 +94,7 @@ fn repair_module_contexts(module_root: &Path, module_id: &str) {
         }
     }
 }
+
 fn recursive_context_repair(base: &Path, current: &Path) -> Result<()> {
     if !current.exists() { return Ok(()); }
     let file_name = current.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -104,6 +109,12 @@ fn recursive_context_repair(base: &Path, current: &Path) -> Result<()> {
         let system_path = Path::new("/").join(relative);
         if system_path.exists() {
             let _ = utils::copy_path_context(&system_path, current);
+        } else {
+            if let Some(parent) = system_path.parent() {
+                if parent.exists() {
+                     let _ = utils::copy_path_context(parent, current);
+                }
+            }
         }
     }
     if current.is_dir() {
@@ -115,6 +126,7 @@ fn recursive_context_repair(base: &Path, current: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 fn has_files_recursive(path: &Path) -> bool {
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
