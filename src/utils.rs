@@ -31,6 +31,7 @@ use extattr::{Flags as XattrFlags, lsetxattr};
 const SELINUX_XATTR: &str = "security.selinux";
 const XATTR_TEST_FILE: &str = ".xattr_test";
 const DEFAULT_CONTEXT: &str = "u:object_r:system_file:s0";
+const OVERLAY_TEST_XATTR: &str = "trusted.overlay.test";
 
 struct SimpleFormatter;
 impl<S, N> FormatEvent<S, N> for SimpleFormatter
@@ -165,6 +166,45 @@ pub fn is_xattr_supported(path: &Path) -> bool {
     }
     let result = lsetfilecon(&test_file, "u:object_r:system_file:s0");
     let supported = result.is_ok();
+    let _ = remove_file(test_file);
+    supported
+}
+
+pub fn is_overlay_xattr_supported(path: &Path) -> bool {
+    let test_file = path.join(".overlay_xattr_test");
+    if let Err(e) = write(&test_file, b"test") {
+        log::debug!("XATTR Check: Failed to create test file: {}", e);
+        return false;
+    }
+    
+    let c_path = match CString::new(test_file.as_os_str().as_encoded_bytes()) {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = remove_file(&test_file);
+            return false;
+        }
+    };
+    
+    let c_key = CString::new(OVERLAY_TEST_XATTR).unwrap();
+    let c_val = CString::new("y").unwrap();
+    
+    let supported = unsafe {
+        let ret = libc::lsetxattr(
+            c_path.as_ptr(),
+            c_key.as_ptr(),
+            c_val.as_ptr() as *const libc::c_void,
+            c_val.as_bytes().len(),
+            0
+        );
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            log::debug!("XATTR Check: trusted.* xattr not supported: {}", err);
+            false
+        } else {
+            true
+        }
+    };
+    
     let _ = remove_file(test_file);
     supported
 }

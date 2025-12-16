@@ -66,9 +66,13 @@ pub fn setup(mnt_base: &Path, img_path: &Path, force_ext4: bool, mount_source: &
 
 fn try_setup_tmpfs(target: &Path, mount_source: &str) -> Result<bool> {
     if utils::mount_tmpfs(target, mount_source).is_ok() {
-        if utils::is_xattr_supported(target) {
+        if utils::is_overlay_xattr_supported(target) {
+            log::info!("Tmpfs mounted and supports xattrs (CONFIG_TMPFS_XATTR=y).");
             return Ok(true);
         } else {
+            log::warn!("Tmpfs mounted but XATTRs (trusted.*) are NOT supported.");
+            log::warn!(">> Your kernel likely lacks CONFIG_TMPFS_XATTR=y.");
+            log::warn!(">> Falling back to legacy Ext4 image mode.");
             let _ = unmount(target, UnmountFlags::DETACH);
         }
     }
