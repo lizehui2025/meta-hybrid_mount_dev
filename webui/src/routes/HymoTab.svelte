@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { API } from '../lib/api';
   import { store } from '../lib/store.svelte';
+  import { ICONS } from '../lib/constants';
   import type { HymoStatus } from '../lib/types';
   import './HymoTab.css';
   import '@material/web/switch/switch.js';
@@ -26,7 +27,6 @@
 
   async function toggleStealth(e: Event) {
     if (!status) return;
-    // Use 'any' to bypass HTMLInputElement type check for custom element properties
     const target = e.target as any;
     const newState = target.selected;
     try {
@@ -59,6 +59,13 @@
     }
   }
 
+  function handleKey(e: KeyboardEvent, action: () => void) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      action();
+    }
+  }
+
   onMount(() => {
     loadStatus();
   });
@@ -69,7 +76,9 @@
     <div class="status-header">
       <div class="status-icon" class:active={status?.available}>
         <md-icon>
-          {#if status?.available}check_circle{:else}cancel{/if}
+          <svg viewBox="0 0 24 24">
+            <path d={status?.available ? ICONS.check_circle : ICONS.cancel} />
+          </svg>
         </md-icon>
       </div>
       <div class="status-info">
@@ -103,12 +112,26 @@
       </div>
 
       <div class="action-row">
-        <md-filled-tonal-button onclick={reorderMounts} style="flex: 1">
-          <md-icon slot="icon">shuffle</md-icon>
+        <md-filled-tonal-button 
+          onclick={reorderMounts} 
+          onkeydown={(e: KeyboardEvent) => handleKey(e, reorderMounts)}
+          role="button"
+          tabindex="0"
+          style="flex: 1">
+          <md-icon slot="icon">
+            <svg viewBox="0 0 24 24"><path d={ICONS.shuffle} /></svg>
+          </md-icon>
           {store.L.hymo.reorderBtn}
         </md-filled-tonal-button>
-        <md-filled-button onclick={loadStatus}>
-          <md-icon slot="icon">refresh</md-icon>
+
+        <md-filled-button 
+          onclick={loadStatus}
+          onkeydown={(e: KeyboardEvent) => handleKey(e, loadStatus)}
+          role="button"
+          tabindex="0">
+          <md-icon slot="icon">
+             <svg viewBox="0 0 24 24"><path d={ICONS.refresh} /></svg>
+          </md-icon>
           {store.L.modules.reload}
         </md-filled-button>
       </div>
