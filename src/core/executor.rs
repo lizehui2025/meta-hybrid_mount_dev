@@ -4,6 +4,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 use rustix::mount::UnmountFlags;
+use procfs::process::Process;
 
 use crate::{
     conf::config, 
@@ -194,6 +195,33 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
     repair_rw_contexts();
 
     log::info!(">> Phase 2: OverlayFS Execution...");
+
+    let all_mounts = match Process::myself().and_then(|p| p.mountinfo()) {
+        Ok(info) => info.0,
+        Err(e) => {
+            log::warn!("Failed to retrieve mountinfo: {}. Child mount restoration may fail.", e);
+            Vec::new()
+        }
+    };
+
+    let mount_map: HashMap<String, Vec<String>> = plan.overlay_ops.iter()
+        .map(|op| {
+            let target_path = Path::new(&op.target);
+            let mut children: Vec<String> = all_mounts.iter()
+                .filter_map(|m| {
+                    if m.mount_point.starts_with(target_path) && m.mount_point != target_path {
+                        Some(m.mount_point.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            children.sort(); 
+            children.dedup();
+            (op.target.clone(), children)
+        })
+        .collect();
+
     let overlay_results: Vec<OverlayResult> = plan.overlay_ops.par_iter()
         .map(|op| {
             let lowerdir_strings: Vec<String> = op.lowerdirs.iter()
@@ -211,8 +239,19 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
                 (None, None)
             };
 
-            log::info!("Mounting {} [OVERLAY] ({} layers)", op.target, lowerdir_strings.len());
-            if let Err(e) = overlay::mount_overlay(&op.target, &lowerdir_strings, work_opt, upper_opt, config.disable_umount) {
+            let empty_vec = Vec::new();
+            let children = mount_map.get(&op.target).unwrap_or(&empty_vec);
+
+            log::info!("Mounting {} [OVERLAY] (Layers: {}, Children: {})", op.target, lowerdir_strings.len(), children.len());
+            
+            if let Err(e) = overlay::mount_overlay(
+                &op.target, 
+                &lowerdir_strings, 
+                work_opt, 
+                upper_opt, 
+                children,
+                config.disable_umount
+            ) {
                 log::warn!("OverlayFS failed for {}: {}. Triggering fallback.", op.target, e);
                 let mut local_magic = Vec::new();
                 let mut local_fallback_ids = Vec::new();

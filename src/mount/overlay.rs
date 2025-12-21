@@ -5,7 +5,6 @@ use std::fs;
 use std::os::fd::AsRawFd;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::ffi::CString;
-use procfs::process::Process;
 use rustix::{fd::AsFd, fs::CWD, mount::*};
 use crate::defs::{KSU_OVERLAY_SOURCE, RUN_DIR};
 use crate::utils::send_unmountable;
@@ -26,6 +25,23 @@ impl Drop for StagedMountGuard {
             }
         }
     }
+}
+
+fn get_overlay_features() -> String {
+    let mut features = String::new();
+    
+    if Path::new("/sys/module/overlay/parameters/redirect_dir").exists() {
+        features.push_str(",redirect_dir=on");
+    }
+    
+    if Path::new("/sys/module/overlay/parameters/metacopy").exists() {
+        if !features.contains("redirect_dir") {
+             features.push_str(",redirect_dir=on");
+        }
+        features.push_str(",metacopy=on");
+    }
+
+    features
 }
 
 pub fn mount_overlayfs(
@@ -153,6 +169,8 @@ fn do_mount_overlay(
         .filter(|wd| wd.exists())
         .map(|e| e.display().to_string());
 
+    let extra_features = get_overlay_features();
+
     let result = (|| {
         let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
         let fs = fs.as_fd();
@@ -162,6 +180,13 @@ fn do_mount_overlay(
         if let (Some(upperdir), Some(workdir)) = (&upperdir_s, &workdir_s) {
             fsconfig_set_string(fs, "upperdir", upperdir)?;
             fsconfig_set_string(fs, "workdir", workdir)?;
+        }
+
+        if extra_features.contains("redirect_dir") {
+            let _ = fsconfig_set_string(fs, "redirect_dir", "on");
+        }
+        if extra_features.contains("metacopy") {
+            let _ = fsconfig_set_string(fs, "metacopy", "on");
         }
         
         fsconfig_set_string(fs, "source", KSU_OVERLAY_SOURCE)?;
@@ -183,6 +208,8 @@ fn do_mount_overlay(
             data = format!("{data},upperdir={upperdir},workdir={workdir}");
         }
         
+        data.push_str(&extra_features);
+
         let data_c = CString::new(data)
             .context("Invalid string for mount data")?;
             
@@ -271,6 +298,7 @@ pub fn mount_overlay(
     module_roots: &[String],
     workdir: Option<PathBuf>,
     upperdir: Option<PathBuf>,
+    child_mounts: &[String],
     disable_umount: bool,
 ) -> Result<()> {
     let root_file = fs::File::open(target_root)
@@ -278,26 +306,10 @@ pub fn mount_overlay(
     
     let stock_root = format!("/proc/self/fd/{}", root_file.as_raw_fd());
     
-    let mounts = Process::myself()
-        .context("Failed to get current process info")?
-        .mountinfo()
-        .context("Failed to get mountinfo")?;
-
-    let mut mount_seq = mounts.0.iter()
-        .filter(|m| {
-            m.mount_point.starts_with(target_root) && 
-            m.mount_point != Path::new(target_root)
-        })
-        .map(|m| m.mount_point.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    
-    mount_seq.sort();
-    mount_seq.dedup();
-
     mount_overlayfs(module_roots, &stock_root, upperdir, workdir, target_root, disable_umount)
         .with_context(|| format!("mount overlayfs for root {target_root} failed"))?;
 
-    for mount_point in mount_seq {
+    for mount_point in child_mounts {
         let relative = mount_point.replacen(target_root, "", 1);
         let stock_root_relative = format!("{}{}", stock_root, relative);
         
@@ -305,7 +317,7 @@ pub fn mount_overlay(
             continue;
         }
 
-        if let Err(e) = mount_overlay_child(&mount_point, &relative, module_roots, &stock_root_relative, disable_umount) {
+        if let Err(e) = mount_overlay_child(mount_point, &relative, module_roots, &stock_root_relative, disable_umount) {
             warn!("failed to restore child mount {mount_point}: {:#}", e);
         }
     }
