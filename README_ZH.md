@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)
 [![Telegram](https://img.shields.io/badge/Telegram-@hybridmountchat-2CA5E0?style=flat-square&logo=telegram)](https://t.me/hybridmountchat)
 
-**Meta-Hybrid Mount** 是专为 KernelSU 和 APatch 设计的下一代混合挂载元模块。它采用原生 Rust 编写，通过智能调度 **HymoFS**、**OverlayFS** 和 **Magic Mount** 三种挂载策略，为您提供性能卓越、稳定且高度隐蔽的模块管理体验。
+**Meta-Hybrid Mount** 是专为 KernelSU 和 APatch 设计的下一代混合挂载元模块。它采用原生 Rust 编写，通过智能调度 **OverlayFS** 和 **Magic Mount** 两种挂载策略，为您提供性能卓越、稳定且高度隐蔽的模块管理体验。
 
 本项目包含一个基于 Svelte 构建的现代化 WebUI，支持实时状态监控、精细化模块配置以及日志查看。
 
@@ -17,7 +17,7 @@
 
 ## ✨ 核心特性
 
-### 🚀 三重混合引擎 (Triple Engine)
+### 🚀 双重混合引擎 (Dual Engine)
 
 Meta-Hybrid 能够为每个模块智能选择最佳挂载方案：
 
@@ -59,8 +59,8 @@ Meta-Hybrid 能够为每个模块智能选择最佳挂载方案：
 
 通过 KernelSU 管理器或浏览器访问 WebUI：
 
-* **仪表盘 (Dashboard)**：查看存储占用、HymoFS 协议版本及内核信息。
-* **模块 (Modules)**：为每个模块单独切换模式 (Overlay/Magic/HymoFS)，查看文件冲突。
+* **仪表盘 (Dashboard)**：查看存储占用及内核信息。
+* **模块 (Modules)**：为每个模块单独切换模式 (Overlay/Magic)，查看文件冲突。
 * **配置 (Config)**：可视化编辑 `config.toml` 参数。
 * **日志 (Logs)**：实时流式查看守护进程日志。
 

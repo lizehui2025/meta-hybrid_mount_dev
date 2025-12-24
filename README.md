@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)
 [![Telegram](https://img.shields.io/badge/Telegram-@hybridmountchat-2CA5E0?style=flat-square&logo=telegram)](https://t.me/hybridmountchat)
 
-**Meta-Hybrid Mount** is a next-generation hybrid mount metamodule designed for KernelSU and APatch. Written in native Rust, it orchestrates multiple mounting strategies—including the cutting-edge **HymoFS**, **OverlayFS**, and **Magic Mount**—to provide the ultimate module management experience with superior performance, stability, and stealth.
+**Meta-Hybrid Mount** is a next-generation hybrid mount metamodule designed for KernelSU and APatch. Written in native Rust, it orchestrates multiple mounting strategies— **OverlayFS** and **Magic Mount**—to provide the ultimate module management experience with superior performance, stability, and stealth.
 
 This project features a modern WebUI built with Svelte, offering real-time status monitoring, granular module configuration, and log inspection.
 
@@ -17,7 +17,7 @@ This project features a modern WebUI built with Svelte, offering real-time statu
 
 ## ✨ Core Features
 
-### 🚀 Triple Hybrid Engine
+### 🚀 Dual Hybrid Engine
 
 Meta-Hybrid intelligently selects the best mounting strategy for each module:
 
@@ -59,8 +59,8 @@ The configuration file is located at `/data/adb/meta-hybrid/config.toml`. You ca
 
 Access the WebUI (via **KernelSU Manager** or browser) to:
 
-* **Dashboard**: Monitor storage, HymoFS status, and kernel version.
-* **Modules**: Toggle mount modes (Overlay/Magic/HymoFS) per module and view file conflicts.
+* **Dashboard**: Monitor storage and kernel version.
+* **Modules**: Toggle mount modes (Overlay/Magic) per module and view file conflicts.
 * **Config**: Visually edit `config.toml` parameters.
 * **Logs**: Stream the daemon logs in real-time.
 
