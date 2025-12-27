@@ -6,7 +6,6 @@ use log::{info, warn};
 use std::{
     ffi::CString,
     fs,
-    io::{BufRead, BufReader},
     os::fd::{AsRawFd, OwnedFd},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -71,43 +70,6 @@ fn get_overlay_features() -> String {
     }
 
     features
-}
-
-fn get_sub_mounts(parent: &str) -> Result<Vec<String>> {
-    let file = fs::File::open("/proc/mounts").context("Failed to open /proc/mounts")?;
-
-    let reader = BufReader::new(file);
-
-    let mut sub_mounts = Vec::new();
-
-    let parent_prefix = if parent.ends_with('/') {
-        parent.to_string()
-    } else {
-        format!("{}/", parent)
-    };
-
-    for line in reader.lines() {
-        let line = line?;
-
-        let parts: Vec<&str> = line.split_whitespace().collect();
-
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let mount_point = parts[1];
-
-        if mount_point.starts_with(&parent_prefix)
-            && mount_point != parent
-            && !mount_point.contains("hybrid_mount")
-        {
-            sub_mounts.push(mount_point.to_string());
-        }
-    }
-
-    sub_mounts.sort_by_key(|a| a.len());
-
-    Ok(sub_mounts)
 }
 
 fn clone_path_context(source: &Path, target: &Path) -> Result<()> {
@@ -528,7 +490,7 @@ pub fn mount_overlay(
 
     let mut all_child_mounts = Vec::new();
 
-    match get_sub_mounts(target_root) {
+    match crate::utils::get_sub_mounts(Path::new(target_root)) {
         Ok(sub_mounts) => {
             if !sub_mounts.is_empty() {
                 info!(

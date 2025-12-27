@@ -32,10 +32,6 @@ const RATOON_RESCUE_NOTICE: &str = "/data/adb/meta-hybrid/rescue_notice";
 
 const GRANARY_DIR: &str = "/data/adb/meta-hybrid/granary";
 
-const CONFIG_PATH: &str = "/data/adb/meta-hybrid/config.toml";
-
-const STATE_PATH: &str = "/data/adb/meta-hybrid/state.json";
-
 pub fn engage_ratoon_protocol() -> Result<()> {
     let path = Path::new(RATOON_COUNTER_FILE);
 
@@ -121,9 +117,9 @@ pub fn create_silo(config: &Config, label: &str, reason: &str) -> Result<String>
 
     let id = format!("silo_{}", now);
 
-    let raw_config = fs::read_to_string(CONFIG_PATH).ok();
+    let raw_config = fs::read_to_string(crate::conf::config::CONFIG_FILE_DEFAULT).ok();
 
-    let raw_state = fs::read_to_string(STATE_PATH).ok();
+    let raw_state = fs::read_to_string(crate::defs::STATE_FILE).ok();
 
     let silo = Silo {
         id: id.clone(),
@@ -204,19 +200,19 @@ pub fn restore_silo(id: &str) -> Result<()> {
     if let Some(raw) = &silo.raw_config {
         log::info!(">> Restoring config from RAW content (preserving comments)...");
 
-        fs::write(CONFIG_PATH, raw)?;
+        fs::write(crate::conf::config::CONFIG_FILE_DEFAULT, raw)?;
     } else {
         log::info!(">> Raw config missing, restoring from struct snapshot...");
 
         let toml_str = toml::to_string(&silo.config_snapshot)?;
 
-        fs::write(CONFIG_PATH, toml_str)?;
+        fs::write(crate::conf::config::CONFIG_FILE_DEFAULT, toml_str)?;
     }
 
     if let Some(state) = &silo.raw_state {
         log::info!(">> Restoring state from snapshot...");
 
-        fs::write(STATE_PATH, state)?;
+        fs::write(crate::defs::STATE_FILE, state)?;
     } else {
         log::warn!(">> No state snapshot found in this Silo. Skipping state restore.");
     }
