@@ -383,13 +383,12 @@ fn make_device_node(path: &Path, mode: u32, rdev: u64) -> Result<()> {
 }
 
 fn apply_system_context(current: &Path, relative: &Path) -> Result<()> {
-    if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
-        if (name == "upperdir" || name == "workdir")
-            && let Some(parent) = current.parent()
-            && let Ok(ctx) = lgetfilecon(parent)
-        {
-            return lsetfilecon(current, &ctx);
-        }
+    if let Some(name) = current.file_name().and_then(|n| n.to_str())
+        && (name == "upperdir" || name == "workdir")
+        && let Some(parent) = current.parent()
+        && let Ok(ctx) = lgetfilecon(parent)
+    {
+        return lsetfilecon(current, &ctx);
     }
 
     let system_path = Path::new("/").join(relative);
