@@ -1,8 +1,6 @@
-## v1.9.51
+## v1.9.52
 
-Changes since v1.9.5:
-* feat: support trusted.overlay.opaque xattr for replace dir detection
-* fix: log phase
-* Revert "refactor(utils): simplify selinux handling to match cp -a behavior"
-* deps: removed unused deps (#90)
-* chore(release): bump version to v1.9.5 [skip ci]
+Changes since v1.9.51:
+* utils: fix SELinux permission denied on tmpfs/EROFS
+* fix(core): smart selinux context repair for system/vendor partitions
+* chore(release): bump version to v1.9.51 [skip ci]
