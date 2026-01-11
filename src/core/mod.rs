@@ -1,6 +1,3 @@
-// Copyright 2025 Meta-Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 pub mod executor;
 pub mod granary;
 pub mod inventory;
@@ -133,7 +130,7 @@ impl OryzaEngine<Planned> {
     pub fn execute(self) -> Result<OryzaEngine<Executed>> {
         tracing::info!(">> Link Start! Executing mount plan...");
 
-        let result = executor::execute(&self.state.plan, &self.config)?;
+        let result = executor::execute(&self.state.plan, &self.config, &self.state.handle)?;
 
         Ok(OryzaEngine {
             config: self.config,
