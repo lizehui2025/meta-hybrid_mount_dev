@@ -21,7 +21,6 @@ pub struct ExecutionResult {
 }
 
 pub enum DiagnosticLevel {
-    #[allow(dead_code)]
     Info,
     Warning,
     Critical,
@@ -229,7 +228,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
     }
 
     if !magic_queue.is_empty() {
-        let tempdir = utils::select_temp_dir()?;
+        let tempdir = PathBuf::from(&config.hybrid_mnt_dir).join("magic_workspace");
         let _ = crate::try_umount::TMPFS.set(tempdir.to_string_lossy().to_string());
 
         tracing::info!(
@@ -254,10 +253,6 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
             tracing::error!("Magic Mount critical failure: {:#}", e);
 
             final_magic_ids.clear();
-        }
-
-        if tempdir.exists() {
-            let _ = rustix::mount::unmount(&tempdir, UnmountFlags::DETACH);
         }
     }
 

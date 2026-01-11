@@ -602,20 +602,6 @@ fn is_ok_empty<P: AsRef<Path>>(dir: P) -> bool {
         .is_ok_and(|mut entries| entries.next().is_none())
 }
 
-pub fn select_temp_dir() -> Result<PathBuf> {
-    for path_str in TMPFS_CANDIDATES {
-        let path = Path::new(path_str);
-        if is_ok_empty(path) {
-            tracing::info!("Selected dynamic temp root: {}", path.display());
-            return Ok(path.to_path_buf());
-        }
-    }
-    let run_dir = Path::new(defs::RUN_DIR);
-    ensure_dir_exists(run_dir)?;
-    let work_dir = run_dir.join("workdir");
-    Ok(work_dir)
-}
-
 #[allow(dead_code)]
 pub fn cleanup_temp_dir(temp_dir: &Path) {
     if let Err(e) = remove_dir_all(temp_dir) {
