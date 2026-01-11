@@ -591,15 +591,6 @@ pub fn sync_dir(src: &Path, dst: &Path, repair_context: bool) -> Result<()> {
     })
 }
 
-fn is_ok_empty<P: AsRef<Path>>(dir: P) -> bool {
-    if !dir.as_ref().exists() {
-        return false;
-    }
-    dir.as_ref()
-        .read_dir()
-        .is_ok_and(|mut entries| entries.next().is_none())
-}
-
 #[allow(dead_code)]
 pub fn cleanup_temp_dir(temp_dir: &Path) {
     if let Err(e) = remove_dir_all(temp_dir) {

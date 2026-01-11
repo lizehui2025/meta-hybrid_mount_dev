@@ -20,6 +20,7 @@ pub struct ExecutionResult {
 }
 
 pub enum DiagnosticLevel {
+    #[allow(dead_code)]
     Info,
     Warning,
     Critical,
