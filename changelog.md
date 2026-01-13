@@ -1,4 +1,4 @@
-## v2.0.45
+## v2.0.47
 
-Changes since v2.0.41:
-* webui: refactor modulestab
+Changes since v2.0.46:
+* chore: add remove personal id from modules.json
