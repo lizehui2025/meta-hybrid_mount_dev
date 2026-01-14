@@ -143,7 +143,7 @@ export default function ModulesTab() {
                         title={store.L.modules?.filterLabel || "Filter modules"}
                     >
                         <option value="all">{store.L.modules?.filterAll}</option>
-                        <option value="overlayfs">Overlay</option> {/* Fixed value from overlay to overlayfs */}
+                        <option value="auto">Overlay</option>
                         <option value="magic">Magic</option>
                     </select>
                 </div>
