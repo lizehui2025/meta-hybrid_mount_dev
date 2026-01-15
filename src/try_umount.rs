@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{LazyLock, Mutex, OnceLock},
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ksu::{NukeExt4Sysfs, TryUmount};
 
 pub static TMPFS: OnceLock<String> = OnceLock::new();
 pub static LIST: LazyLock<Mutex<TryUmount>> = LazyLock::new(|| Mutex::new(TryUmount::new()));
+static HISTORY: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 pub fn send_unmountable<P>(target: P) -> Result<()>
 where
@@ -19,6 +21,16 @@ where
     if !crate::utils::KSU.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(());
     }
+
+    let path_str = target.as_ref().to_string_lossy().to_string();
+    let mut history = HISTORY.lock().unwrap();
+
+    if history.contains(&path_str) {
+        tracing::debug!("Ignored duplicate unmount request: {}", path_str);
+        return Ok(());
+    }
+
+    history.insert(path_str);
     LIST.lock().unwrap().add(target);
     Ok(())
 }
