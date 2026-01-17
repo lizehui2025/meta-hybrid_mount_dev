@@ -1,6 +1,3 @@
-// Copyright 2025 Meta-Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -41,6 +38,7 @@ fn extract_module_root(partition_path: &Path) -> Option<PathBuf> {
 
 struct OverlayResult {
     fallback_ids: Vec<String>,
+    magic_candidates: Vec<String>,
     success_records: Vec<(PathBuf, String)>,
 }
 
@@ -154,22 +152,19 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
                     e
                 );
 
-                let mut local_magic = Vec::new();
-
                 let mut local_fallback_ids = Vec::new();
+                let mut local_magic_candidates = Vec::new();
 
                 for layer_path in &op.lowerdirs {
-                    if let Some(root) = extract_module_root(layer_path) {
-                        local_magic.push(root.clone());
-
-                        if let Some(id) = utils::extract_module_id(layer_path) {
-                            local_fallback_ids.push(id);
-                        }
+                    if let Some(id) = utils::extract_module_id(layer_path) {
+                        local_fallback_ids.push(id.clone());
+                        local_magic_candidates.push(id);
                     }
                 }
 
                 return OverlayResult {
                     fallback_ids: local_fallback_ids,
+                    magic_candidates: local_magic_candidates,
                     success_records: Vec::new(),
                 };
             }
@@ -192,6 +187,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
 
             OverlayResult {
                 fallback_ids: Vec::new(),
+                magic_candidates: Vec::new(),
                 success_records: successes,
             }
         })
@@ -200,6 +196,10 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
     for res in overlay_results {
         for id in res.fallback_ids {
             final_overlay_ids.remove(&id);
+        }
+
+        for id in res.magic_candidates {
+            magic_queue.push(id);
         }
 
         for (root, partition) in res.success_records {
@@ -218,11 +218,6 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
     let mut magic_need_ids = HashSet::new();
 
     for id in &magic_queue {
-        /*if let Some(name) = path.file_name() {
-            let name_str = name.to_string_lossy().to_string();
-            final_magic_ids.push(name_str.clone());
-            magic_need_ids.insert(name_str);
-        }*/
         magic_need_ids.insert(id.to_string());
     }
 
@@ -252,6 +247,8 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
             log::error!("Magic Mount critical failure: {:#}", e);
 
             final_magic_ids.clear();
+        } else {
+            final_magic_ids = magic_queue.clone();
         }
     }
 
