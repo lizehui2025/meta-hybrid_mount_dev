@@ -7,8 +7,8 @@ case "$ARCH" in
 "x64")
   ABI="x86_64"
   ;;
-"riscv64")
-  ABI="riscv64"
+"arm")
+  ABI="armeabi-v7a"
   ;;
 *)
   abort "! Unsupported architecture: $ARCH"
