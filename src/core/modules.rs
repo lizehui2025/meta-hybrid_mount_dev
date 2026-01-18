@@ -1,6 +1,3 @@
-// Copyright 2025 Meta-Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 use std::{
     collections::HashSet,
     fs::{self},
@@ -165,12 +162,7 @@ pub fn print_list(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn update_description(
-    storage_mode: &str,
-    nuke_active: bool,
-    overlay_count: usize,
-    magic_count: usize,
-) {
+pub fn update_description(storage_mode: &str, overlay_count: usize, magic_count: usize) {
     let prop_path = Path::new(defs::MODULE_PROP_FILE);
 
     if !prop_path.exists() {
@@ -189,15 +181,9 @@ pub fn update_description(
         _ => "💿",
     };
 
-    let nuke_str = if nuke_active {
-        " | 肉垫: 开启 ✨"
-    } else {
-        ""
-    };
-
     let desc_text = format!(
-        "description=😋 运行中喵～ ({}) {} | Overlay: {} | Magic: {}{}",
-        mode_str, status_emoji, overlay_count, magic_count, nuke_str
+        "description=😋 运行中喵～ ({}) {} | Overlay: {} | Magic: {}",
+        mode_str, status_emoji, overlay_count, magic_count
     );
 
     let lines: Vec<String> = match fs::File::open(prop_path) {

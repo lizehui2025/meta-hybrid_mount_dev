@@ -1,8 +1,3 @@
-/**
- * Copyright 2026 Hybrid Mount Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 export interface GranaryConfig {
   max_backups: number;
   retention_days: number;
@@ -22,10 +17,8 @@ export interface AppConfig {
   hybrid_mnt_dir: string;
   partitions: string[];
   overlay_mode: OverlayMode;
-  enable_nuke: boolean;
   disable_umount: boolean;
   allow_umount_coexistence: boolean;
-  dry_run: boolean;
   logfile?: string;
   granary: GranaryConfig;
 }

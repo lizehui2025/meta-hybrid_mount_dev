@@ -1,6 +1,3 @@
-// Copyright 2026 Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -20,8 +17,6 @@ pub struct Cli {
     pub verbose: bool,
     #[arg(short = 'p', long = "partitions", value_delimiter = ',')]
     pub partitions: Vec<String>,
-    #[arg(long = "dry-run")]
-    pub dry_run: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

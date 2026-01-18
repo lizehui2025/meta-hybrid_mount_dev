@@ -12,10 +12,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   logfile: RUST_PATHS.DAEMON_LOG || '/data/adb/meta-hybrid/daemon.log',
   verbose: false,
   partitions: [],
-  enable_nuke: false,
   disable_umount: false,
   allow_umount_coexistence: false,
-  dry_run: false,
   granary: {
     max_backups: 20,
     retention_days: 0

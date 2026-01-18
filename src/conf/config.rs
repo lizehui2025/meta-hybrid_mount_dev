@@ -1,6 +1,3 @@
-// Copyright 2026 Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -66,13 +63,9 @@ pub struct Config {
     #[serde(default)]
     pub overlay_mode: OverlayMode,
     #[serde(default)]
-    pub enable_nuke: bool,
-    #[serde(default)]
     pub disable_umount: bool,
     #[serde(default)]
     pub allow_umount_coexistence: bool,
-    #[serde(default)]
-    pub dry_run: bool,
     #[serde(default)]
     pub granary: GranaryConfig,
     #[serde(default = "default_hybrid_mnt_dir")]
@@ -122,10 +115,8 @@ impl Default for Config {
             verbose: false,
             partitions: Vec::new(),
             overlay_mode: OverlayMode::default(),
-            enable_nuke: false,
             disable_umount: false,
             allow_umount_coexistence: false,
-            dry_run: false,
             granary: GranaryConfig::default(),
             hybrid_mnt_dir: default_hybrid_mnt_dir(),
             default_mode: DefaultMode::default(),
@@ -164,7 +155,6 @@ impl Config {
         mountsource: Option<String>,
         verbose: bool,
         partitions: Vec<String>,
-        dry_run: bool,
     ) {
         if let Some(dir) = moduledir {
             self.moduledir = dir;
@@ -180,10 +170,6 @@ impl Config {
 
         if !partitions.is_empty() {
             self.partitions = partitions;
-        }
-
-        if dry_run {
-            self.dry_run = true;
         }
     }
 }

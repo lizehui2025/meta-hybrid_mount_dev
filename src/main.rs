@@ -1,6 +1,3 @@
-// Copyright 2026 Hybrid Mount Authors
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 mod conf;
 mod core;
 mod defs;
@@ -9,7 +6,7 @@ mod mount;
 mod try_umount;
 mod utils;
 
-use core::{OryzaEngine, executor, granary, inventory, planner};
+use core::{OryzaEngine, granary};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -90,34 +87,30 @@ fn main() -> Result<()> {
         cli.mountsource.clone(),
         cli.verbose,
         cli.partitions.clone(),
-        cli.dry_run,
     );
 
-    if !config.dry_run {
-        match granary::engage_ratoon_protocol() {
-            Ok(granary::RatoonStatus::Restored) => {
-                log::warn!(">> Config restored by Ratoon Protocol. Reloading...");
-                match load_config(&cli) {
-                    Ok(new_config) => {
-                        config = new_config;
-                        config.merge_with_cli(
-                            cli.moduledir.clone(),
-                            cli.mountsource.clone(),
-                            cli.verbose,
-                            cli.partitions.clone(),
-                            cli.dry_run,
-                        );
-                        log::info!(">> Config reloaded successfully.");
-                    }
-                    Err(e) => {
-                        log::error!(">> Failed to reload config after restore: {}", e);
-                    }
+    match granary::engage_ratoon_protocol() {
+        Ok(granary::RatoonStatus::Restored) => {
+            log::warn!(">> Config restored by Ratoon Protocol. Reloading...");
+            match load_config(&cli) {
+                Ok(new_config) => {
+                    config = new_config;
+                    config.merge_with_cli(
+                        cli.moduledir.clone(),
+                        cli.mountsource.clone(),
+                        cli.verbose,
+                        cli.partitions.clone(),
+                    );
+                    log::info!(">> Config reloaded successfully.");
+                }
+                Err(e) => {
+                    log::error!(">> Failed to reload config after restore: {}", e);
                 }
             }
-            Ok(granary::RatoonStatus::Standby) => {}
-            Err(e) => {
-                log::error!("Failed to engage Ratoon Protocol: {}", e);
-            }
+        }
+        Ok(granary::RatoonStatus::Standby) => {}
+        Err(e) => {
+            log::error!("Failed to engage Ratoon Protocol: {}", e);
         }
     }
 
@@ -126,7 +119,7 @@ fn main() -> Result<()> {
             if config.verbose {
                 println!(
                     ">> ZygiskSU Enforce!=0 detected, but Umount Coexistence enabled. Respecting \
-                     user config."
+                        user config."
                 );
             }
         } else {
@@ -139,75 +132,6 @@ fn main() -> Result<()> {
     }
 
     utils::init_logging(config.verbose).context("Failed to initialize logging")?;
-
-    if config.dry_run {
-        log::info!(":: DRY-RUN / DIAGNOSTIC MODE ::");
-
-        let module_list =
-            inventory::scan(&config.moduledir, &config).context("Inventory scan failed")?;
-
-        log::info!(">> Inventory: Found {} modules", module_list.len());
-
-        let plan = planner::generate(&config, &module_list, &config.moduledir)
-            .context("Plan generation failed")?;
-
-        log::info!(">> Analyzing File Conflicts...");
-
-        let report = plan.analyze_conflicts();
-
-        if report.details.is_empty() {
-            log::info!("   No file conflicts detected. Clean.");
-        } else {
-            log::warn!("!! DETECTED {} FILE CONFLICTS !!", report.details.len());
-
-            for c in report.details {
-                log::warn!(
-                    "   [{}] /{}/{} <== {:?}",
-                    "CONFLICT",
-                    c.partition,
-                    c.relative_path,
-                    c.contending_modules
-                );
-            }
-        }
-
-        log::info!(">> Running System Diagnostics...");
-
-        let issues = executor::diagnose_plan(&plan);
-
-        let mut critical_count = 0;
-
-        for issue in issues {
-            match issue.level {
-                core::executor::DiagnosticLevel::Critical => {
-                    log::error!("[CRITICAL][{}] {}", issue.context, issue.message);
-
-                    critical_count += 1;
-                }
-                core::executor::DiagnosticLevel::Warning => {
-                    log::warn!("[WARN][{}] {}", issue.context, issue.message);
-                }
-                core::executor::DiagnosticLevel::Info => {
-                    log::info!("[INFO][{}] {}", issue.context, issue.message);
-                }
-            }
-        }
-
-        if critical_count > 0 {
-            log::error!(
-                ">> ❌ DIAGNOSTICS FAILED: {} critical issues found.",
-                critical_count
-            );
-
-            log::error!(">> Mounting now would likely result in a bootloop.");
-
-            std::process::exit(1);
-        } else {
-            log::info!(">> ✅ Diagnostics passed. System looks healthy.");
-        }
-
-        return Ok(());
-    }
 
     let camouflage_name = utils::random_kworker_name();
 

@@ -1,8 +1,3 @@
-/**
- * Copyright 2025 Meta-Hybrid Mount Authors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { createSignal, createEffect, createMemo, Show, For } from 'solid-js';
 import { store } from '../lib/store';
 import { ICONS } from '../lib/constants';
@@ -86,7 +81,6 @@ export default function ConfigTab() {
   }
 
   function toggle(key: keyof AppConfig) {
-    // @ts-ignore
     const currentVal = store.config[key] as boolean;
     const newVal = !currentVal;
 
@@ -324,21 +318,6 @@ export default function ConfigTab() {
 
           <div class="options-grid">
             <button 
-              class={`option-tile clickable error ${store.config.enable_nuke ? 'active' : ''}`}
-              onClick={() => toggle('enable_nuke')}
-            >
-              <md-ripple></md-ripple>
-              <div class="tile-top">
-                <div class="tile-icon">
-                  <md-icon><svg viewBox="0 0 24 24"><path d={ICONS.cat_paw} /></svg></md-icon>
-                </div>
-              </div>
-              <div class="tile-bottom">
-                <span class="tile-label">{store.L.config.enableNuke}</span>
-              </div>
-            </button>
-
-            <button 
               class={`option-tile clickable tertiary ${store.config.disable_umount ? 'active' : ''}`}
               onClick={() => toggle('disable_umount')}
             >
@@ -385,23 +364,6 @@ export default function ConfigTab() {
                 <span class="tile-label">{store.L.config.verboseLabel}</span>
               </div>
             </button>
-
-            <Show when={store.config.verbose}>
-              <button 
-                class={`option-tile clickable secondary ${store.config.dry_run ? 'active' : ''}`}
-                onClick={() => toggle('dry_run')}
-              >
-                <md-ripple></md-ripple>
-                <div class="tile-top">
-                  <div class="tile-icon">
-                    <md-icon><svg viewBox="0 0 24 24"><path d={ICONS.ghost} /></svg></md-icon>
-                  </div>
-                </div>
-                <div class="tile-bottom">
-                  <span class="tile-label">{store.L.config.dryRun}</span>
-                </div>
-              </button>
-            </Show>
           </div>
         </section>
 
