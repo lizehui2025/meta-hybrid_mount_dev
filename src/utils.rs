@@ -211,7 +211,14 @@ pub fn lgetfilecon<P: AsRef<Path>>(_path: P) -> Result<String> {
 
 pub fn copy_path_context<S: AsRef<Path>, D: AsRef<Path>>(src: S, dst: D) -> Result<()> {
     let mut context = if src.as_ref().exists() {
-        lgetfilecon(&src).unwrap_or_else(|_| CONTEXT_SYSTEM.to_string())
+        lgetfilecon(&src).unwrap_or_else(|e| {
+            log::debug!(
+                "Failed to get context for {}: {}",
+                src.as_ref().display(),
+                e
+            );
+            CONTEXT_SYSTEM.to_string()
+        })
     } else {
         CONTEXT_SYSTEM.to_string()
     };

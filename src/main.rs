@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()
-        .unwrap();
+        .context("Failed to initialize global thread pool")?;
 
     let cli = Cli::parse();
 
