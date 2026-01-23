@@ -240,7 +240,13 @@ pub fn generate(
         }
     }
 
-    for (part, layers) in overlay_groups {
+    for (part, layers) in overlay_groups.clone() {
+        if part.trim() == "vendor" {
+            overlay_groups.remove(&part);
+            log::debug!("Modification of the /vendor operation is temporarily disabled!");
+            continue;
+        }
+
         let initial_target_path = format!("/{}", part);
 
         let target_path_obj = Path::new(&initial_target_path);
