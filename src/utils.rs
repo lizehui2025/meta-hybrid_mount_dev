@@ -3,8 +3,8 @@
 
 use std::{
     ffi::CString,
-    fs::{self, File, create_dir_all, remove_dir_all, remove_file, write},
-    io::Write,
+    fs::{self, File, OpenOptions, create_dir_all, remove_dir_all, remove_file, write},
+    io::{Read, Write},
     os::unix::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
@@ -88,20 +88,34 @@ pub fn init_logging(verbose: bool) -> Result<()> {
     Ok(())
 }
 
+fn read_urandom(buf: &mut [u8]) -> Result<()> {
+    let mut file = File::open("/dev/urandom").context("Failed to open /dev/urandom")?;
+    file.read_exact(buf)
+        .context("Failed to read from /dev/urandom")?;
+    Ok(())
+}
+
 pub fn atomic_write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let mut rand_buf = [0u8; 8];
+    read_urandom(&mut rand_buf)?;
+    let random_hex = rand_buf
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
     let pid = std::process::id();
-    let temp_name = format!(".{}_{}.tmp", pid, now);
+    let temp_name = format!(".{}_{}.tmp", pid, random_hex);
     let temp_file = dir.join(temp_name);
 
     {
-        let mut file = File::create(&temp_file)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_file)
+            .context("Failed to create temporary file atomically")?;
         file.write_all(content.as_ref())?;
         file.sync_all()?;
     }
@@ -568,4 +582,30 @@ pub fn prune_empty_dirs<P: AsRef<Path>>(root: P) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn test_atomic_write() {
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join(format!("atomic_write_test_{}", std::process::id()));
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let file_path = test_dir.join("test_file.txt");
+        let content = b"Hello, World!";
+
+        atomic_write(&file_path, content).unwrap();
+
+        assert!(file_path.exists());
+        let mut file = File::open(&file_path).unwrap();
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).unwrap();
+        assert_eq!(buffer, content);
+
+        std::fs::remove_dir_all(&test_dir).unwrap();
+    }
 }
