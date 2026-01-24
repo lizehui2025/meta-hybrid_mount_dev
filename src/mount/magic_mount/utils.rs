@@ -123,7 +123,12 @@ pub fn collect_module_files(
             continue;
         }
 
-        let id = entry.file_name().to_str().unwrap().to_string();
+        let file_name = entry.file_name();
+        let Some(id) = file_name.to_str() else {
+            log::warn!("Skipping module with invalid UTF-8 filename: {file_name:?}");
+            continue;
+        };
+        let id = id.to_string();
         log::debug!("processing new module: {id}");
 
         if !need_id.contains(&id) {
@@ -242,4 +247,36 @@ where
         src_symlink.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn test_collect_module_files_invalid_utf8() {
+        let temp_dir = std::env::temp_dir().join(format!("meta_hybrid_test_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create a directory with invalid UTF-8 name (0xFF is invalid in UTF-8)
+        let invalid_name_bytes = b"\xff";
+        let invalid_name = OsStr::from_bytes(invalid_name_bytes);
+        let invalid_path = temp_dir.join(invalid_name);
+        fs::create_dir(&invalid_path).unwrap();
+
+        let extra_partitions = vec![];
+        let need_id = HashSet::new();
+
+        // This should not panic
+        let result = collect_module_files(&temp_dir, &extra_partitions, need_id);
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).unwrap();
+
+        assert!(result.is_ok());
+    }
 }
