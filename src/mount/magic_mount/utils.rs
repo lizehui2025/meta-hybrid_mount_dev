@@ -106,6 +106,21 @@ where
     Ok(())
 }
 
+/// Collects module files from the specified directory.
+///
+/// This function iterates over subdirectories in `module_dir`, validating them against
+/// `need_id` and checking for `module.prop`. It constructs a `Node` tree representing
+/// the module structure to be mounted.
+///
+/// # Arguments
+///
+/// * `module_dir` - The directory containing module subdirectories.
+/// * `extra_partitions` - List of extra partitions to consider.
+/// * `need_id` - Set of module IDs that should be included.
+///
+/// # Returns
+///
+/// Returns `Ok(Some(Node))` if any modules are collected, or `Ok(None)` otherwise.
 pub fn collect_module_files(
     module_dir: &Path,
     extra_partitions: &[String],
@@ -123,7 +138,16 @@ pub fn collect_module_files(
             continue;
         }
 
-        let id = entry.file_name().to_str().unwrap().to_string();
+        let id = match entry.file_name().to_str() {
+            Some(name) => name.to_string(),
+            None => {
+                log::warn!(
+                    "skipping module with invalid utf-8 name: {:?}",
+                    entry.file_name()
+                );
+                continue;
+            }
+        };
         log::debug!("processing new module: {id}");
 
         if !need_id.contains(&id) {
