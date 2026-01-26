@@ -132,30 +132,22 @@ pub fn setup(
         let _ = umount(mnt_base, UnmountFlags::DETACH);
     }
 
-    let try_hide = |path: &Path| {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        if !disable_umount {
-            let _ = send_umountable(path);
-        }
+    let erofs_path = img_path.with_extension("erofs");
 
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let _ = path;
-    };
-
-    let make_private = |path: &Path| {
-        if let Err(e) = mount_change(path, MountPropagationFlags::PRIVATE) {
-            log::warn!("Failed to make storage private: {}", e);
-        }
-    };
-
+    // 清理逻辑：如果启用 EROFS 模式
     if use_erofs && utils::is_erofs_supported() {
-        let erofs_path = img_path.with_extension("erofs");
+        // 如果存在旧的 ext4 镜像，清理它以防污染
+        if img_path.exists() {
+            let _ = fs::remove_file(img_path);
+        }
 
         utils::mount_tmpfs(mnt_base, mount_source)?;
+        if let Err(e) = mount_change(mnt_base, MountPropagationFlags::PRIVATE) {
+            log::warn!("Failed to make storage private: {}", e);
+        }
 
-        make_private(mnt_base);
-
-        try_hide(mnt_base);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if !disable_umount { let _ = send_umountable(mnt_base); }
 
         return Ok(StorageHandle {
             mount_point: mnt_base.to_path_buf(),
@@ -164,16 +156,18 @@ pub fn setup(
         });
     }
 
+    // 清理逻辑：如果使用 TMPFS 模式
     if !force_ext4 && try_setup_tmpfs(mnt_base, mount_source)? {
-        make_private(mnt_base);
-
-        try_hide(mnt_base);
-
-        let erofs_path = img_path.with_extension("erofs");
-
-        if erofs_path.exists() {
-            let _ = fs::remove_file(erofs_path);
+        if let Err(e) = mount_change(mnt_base, MountPropagationFlags::PRIVATE) {
+            log::warn!("Failed to make storage private: {}", e);
         }
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if !disable_umount { let _ = send_umountable(mnt_base); }
+
+        // 彻底清理所有持久化镜像
+        if erofs_path.exists() { let _ = fs::remove_file(&erofs_path); }
+        if img_path.exists() { let _ = fs::remove_file(img_path); }
 
         return Ok(StorageHandle {
             mount_point: mnt_base.to_path_buf(),
@@ -182,11 +176,17 @@ pub fn setup(
         });
     }
 
+    // 如果执行到这里，说明进入 EXT4 模式
+    if erofs_path.exists() { let _ = fs::remove_file(erofs_path); }
+
     let handle = setup_ext4_image(mnt_base, img_path, moduledir)?;
 
-    make_private(mnt_base);
+    if let Err(e) = mount_change(mnt_base, MountPropagationFlags::PRIVATE) {
+        log::warn!("Failed to make storage private: {}", e);
+    }
 
-    try_hide(mnt_base);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if !disable_umount { let _ = send_umountable(mnt_base); }
 
     Ok(handle)
 }
