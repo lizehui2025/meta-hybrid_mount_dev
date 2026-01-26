@@ -38,24 +38,33 @@ pub fn tmpfs_skeleton<P>(path: P, work_dir_path: P, node: &Node) -> Result<()>
 where
     P: AsRef<Path>,
 {
-    let (path, work_dir_path) = (path.as_ref(), work_dir_path.as_ref());
-    log::debug!(
-        "creating tmpfs skeleton for {} at {}",
-        path.display(),
-        work_dir_path.display()
-    );
+    let path = path.as_ref();
+    let work_dir_path = work_dir_path.as_ref();
+    
+    log::debug!("Building tmpfs skeleton for {}", path.display());
 
     create_dir_all(work_dir_path)?;
 
-    let (metadata, path) = metadata_path(path, node)?;
+    // 确定参考路径：优先使用系统真实路径获取权限和标签
+    let ref_path = if path.exists() {
+        path.to_path_buf()
+    } else if let Some(mod_path) = &node.module_path {
+        mod_path.clone()
+    } else {
+        bail!("Critical: No reference path for directory {}", path.display());
+    };
 
+    let metadata = ref_path.metadata()?;
+    
+    // 同步 Unix 权限
     chmod(work_dir_path, Mode::from_raw_mode(metadata.mode()))?;
-    chown(
-        work_dir_path,
-        Some(Uid::from_raw(metadata.uid())),
-        Some(Gid::from_raw(metadata.gid())),
-    )?;
-    lsetfilecon(work_dir_path, lgetfilecon(path)?.as_str())?;
+    chown(work_dir_path, Some(Uid::from_raw(metadata.uid())), Some(Gid::from_raw(metadata.gid())))?;
+
+    // 同步 SELinux 标签：解决“不及预期”的关键
+    // 如果是系统目录，确保它不带有 ksu_file 或 unlabeled 标签
+    if let Ok(ctx) = lgetfilecon(&ref_path) {
+        lsetfilecon(work_dir_path, &ctx).ok();
+    }
 
     Ok(())
 }
@@ -64,43 +73,30 @@ pub fn mount_mirror<P>(path: P, work_dir_path: P, entry: &DirEntry) -> Result<()
 where
     P: AsRef<Path>,
 {
-    let path = path.as_ref().join(entry.file_name());
-    let work_dir_path = work_dir_path.as_ref().join(entry.file_name());
+    let src = path.as_ref().join(entry.file_name());
+    let dst = work_dir_path.as_ref().join(entry.file_name());
     let file_type = entry.file_type()?;
 
     if file_type.is_file() {
-        log::debug!(
-            "mount mirror file {} -> {}",
-            path.display(),
-            work_dir_path.display()
-        );
-        fs::File::create(&work_dir_path)?;
-        mount_bind(&path, &work_dir_path)?;
+        // 创建空文件作为挂载点
+        fs::File::create(&dst)?;
+        mount_bind(&src, &dst)?;
     } else if file_type.is_dir() {
-        log::debug!(
-            "mount mirror dir {} -> {}",
-            path.display(),
-            work_dir_path.display()
-        );
-        create_dir(&work_dir_path)?;
+        create_dir(&dst)?;
         let metadata = entry.metadata()?;
-        chmod(&work_dir_path, Mode::from_raw_mode(metadata.mode()))?;
-        chown(
-            &work_dir_path,
-            Some(Uid::from_raw(metadata.uid())),
-            Some(Gid::from_raw(metadata.gid())),
-        )?;
-        lsetfilecon(&work_dir_path, lgetfilecon(&path)?.as_str())?;
-        for entry in path.read_dir()?.flatten() {
-            mount_mirror(&path, &work_dir_path, &entry)?;
+        chmod(&dst, Mode::from_raw_mode(metadata.mode()))?;
+        chown(&dst, Some(Uid::from_raw(metadata.uid())), Some(Gid::from_raw(metadata.gid())))?;
+        
+        if let Ok(ctx) = lgetfilecon(&src) {
+            lsetfilecon(&dst, &ctx).ok();
+        }
+
+        // 递归镜像子目录
+        for sub_entry in src.read_dir()?.flatten() {
+            mount_mirror(&src, &dst, &sub_entry)?;
         }
     } else if file_type.is_symlink() {
-        log::debug!(
-            "create mirror symlink {} -> {}",
-            path.display(),
-            work_dir_path.display()
-        );
-        clone_symlink(&path, &work_dir_path)?;
+        clone_symlink(&src, &dst)?;
     }
 
     Ok(())
@@ -232,14 +228,15 @@ pub fn clone_symlink<S>(src: S, dst: S) -> Result<()>
 where
     S: AsRef<Path>,
 {
-    let src_symlink = read_link(src.as_ref())?;
-    symlink(&src_symlink, dst.as_ref())?;
-    lsetfilecon(dst.as_ref(), lgetfilecon(src.as_ref())?.as_str())?;
-    log::debug!(
-        "clone symlink {} -> {}({})",
-        dst.as_ref().display(),
-        dst.as_ref().display(),
-        src_symlink.display()
-    );
+    let src_path = src.as_ref();
+    let dst_path = dst.as_ref();
+    
+    let link_target = read_link(src_path)?;
+    symlink(&link_target, dst_path)?;
+    
+    // 还原软链接本身的标签
+    if let Ok(ctx) = lgetfilecon(src_path) {
+        lsetfilecon(dst_path, &ctx).ok();
+    }
     Ok(())
 }
