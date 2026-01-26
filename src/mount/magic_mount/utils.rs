@@ -2,23 +2,117 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
-    collections::HashSet,
-    fs::{self, DirEntry, Metadata, create_dir, create_dir_all, read_link},
-    os::unix::fs::{MetadataExt, symlink},
+    collections::{hash_map::Entry, HashMap, HashSet},
+    fs::{self, create_dir, create_dir_all, read_link, DirEntry, Metadata},
+    os::unix::fs::{symlink, FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
+use extattr::lgetxattr;
 use rustix::{
-    fs::{Gid, Mode, Uid, chmod, chown},
+    fs::{chmod, chown, Gid, Mode, Uid},
     mount::mount_bind,
 };
 
 use crate::{
-    defs::{DISABLE_FILE_NAME, REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME},
-    mount::node::Node,
+    defs::{
+        DISABLE_FILE_NAME, REMOVE_FILE_NAME, REPLACE_DIR_FILE_NAME, REPLACE_DIR_XATTR,
+        SKIP_MOUNT_FILE_NAME,
+    },
+    mount::node::{Node, NodeFileType},
     utils::{lgetfilecon, lsetfilecon, validate_module_id},
 };
+
+// --- Logic Moved from Node Implementation (Decoupled) ---
+
+fn dir_is_replace<P>(path: P) -> bool
+where
+    P: AsRef<Path>,
+{
+    if let Ok(v) = lgetxattr(&path, REPLACE_DIR_XATTR)
+        && String::from_utf8_lossy(&v) == "y"
+    {
+        return true;
+    }
+
+    path.as_ref().join(REPLACE_DIR_FILE_NAME).exists()
+}
+
+fn create_root_node<S>(name: S) -> Node
+where
+    S: AsRef<str> + Into<String>,
+{
+    Node {
+        name: name.into(),
+        file_type: NodeFileType::Directory,
+        children: HashMap::default(),
+        module_path: None,
+        replace: false,
+        skip: false,
+    }
+}
+
+fn create_module_node<S>(name: &S, entry: &DirEntry) -> Option<Node>
+where
+    S: ToString,
+{
+    if let Ok(metadata) = entry.metadata() {
+        let path = entry.path();
+        let file_type = if metadata.file_type().is_char_device() && metadata.rdev() == 0 {
+            Some(NodeFileType::Whiteout)
+        } else {
+            Some(NodeFileType::from(metadata.file_type()))
+        };
+        if let Some(file_type) = file_type {
+            let replace = file_type == NodeFileType::Directory && dir_is_replace(&path);
+            if replace {
+                log::debug!("{} need replace", path.display());
+            }
+            return Some(Node {
+                name: name.to_string(),
+                file_type,
+                children: HashMap::default(),
+                module_path: Some(path),
+                replace,
+                skip: false,
+            });
+        }
+    }
+
+    None
+}
+
+fn populate_node_recursive<P>(node: &mut Node, module_dir: P) -> Result<bool>
+where
+    P: AsRef<Path>,
+{
+    let dir = module_dir.as_ref();
+    let mut has_file = false;
+    for entry in dir.read_dir()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Check if child already exists, if so modify it, else create new
+        let child_node = match node.children.entry(name.clone()) {
+            Entry::Occupied(o) => Some(o.into_mut()),
+            Entry::Vacant(v) => create_module_node(&name, &entry).map(|it| v.insert(it)),
+        };
+
+        if let Some(child_node) = child_node {
+            has_file |= if child_node.file_type == NodeFileType::Directory {
+                // Recursively collect
+                populate_node_recursive(child_node, dir.join(&child_node.name))?
+                    || child_node.replace
+            } else {
+                true
+            }
+        }
+    }
+
+    Ok(has_file)
+}
+
+// --- End of Moved Logic ---
 
 fn metadata_path<P>(path: P, node: &Node) -> Result<(Metadata, PathBuf)>
 where
@@ -111,8 +205,8 @@ pub fn collect_module_files(
     extra_partitions: &[String],
     need_id: HashSet<String>,
 ) -> Result<Option<Node>> {
-    let mut root = Node::new_root("");
-    let mut system = Node::new_root("system");
+    let mut root = create_root_node("");
+    let mut system = create_root_node("system");
     let module_root = module_dir;
     let mut has_file = HashSet::new();
 
@@ -124,12 +218,13 @@ pub fn collect_module_files(
         }
 
         let id = entry.file_name().to_str().unwrap().to_string();
-        log::debug!("processing new module: {id}");
-
+        
+        // HYBRID MOUNT FIX: 增加 need_id 过滤
         if !need_id.contains(&id) {
-            log::debug!("module {id} was blocked.");
             continue;
         }
+        
+        log::debug!("processing new module: {id}");
 
         let prop = entry.path().join("module.prop");
         if !prop.exists() {
@@ -177,7 +272,8 @@ pub fn collect_module_files(
                 continue;
             }
 
-            has_file.insert(system.collect_module_files(entry.path().join(&p))?);
+            // Using the new standalone logic function
+            has_file.insert(populate_node_recursive(&mut system, entry.path().join(&p))?);
         }
     }
 
