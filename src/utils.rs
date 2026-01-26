@@ -382,43 +382,56 @@ fn guess_context_by_path(path: &Path) -> &'static str {
     CONTEXT_SYSTEM
 }
 
+/// 修复版 SELinux 上下文恢复逻辑
+/// 即使失败也返回 Ok(()) 以免中断 OverlayFS 准备流程
 fn apply_system_context(current: &Path, relative: &Path) -> Result<()> {
-    // 基础安全路径过滤：如果是 upperdir/workdir 内部，继承父级目录上下文
     if let Some(name) = current.file_name().and_then(|n| n.to_str())
         && (name == "upperdir" || name == "workdir")
         && let Some(parent) = current.parent()
         && let Ok(ctx) = lgetfilecon(parent)
     {
-        return lsetfilecon(current, &ctx);
+        let _ = lsetfilecon(current, &ctx);
+        return Ok(());
     }
 
-    // 模式 1：参考还原 (Reference Logic)
-    // 构造在根文件系统中的原始路径
+    let current_ctx = lgetfilecon(current).ok();
+    if let Some(ctx) = &current_ctx
+        && !ctx.is_empty()
+        && ctx != CONTEXT_ROOTFS
+        && ctx != "u:object_r:unlabeled:s0"
+    {
+        return Ok(());
+    }
+
     let system_path = Path::new("/").join(relative);
     if system_path.exists() {
         if let Ok(sys_ctx) = lgetfilecon(&system_path) {
-            // Android 系统中根目录常被识别为 rootfs，需修正为 system_file
             let target_ctx = if sys_ctx == CONTEXT_ROOTFS {
                 CONTEXT_SYSTEM
             } else {
                 &sys_ctx
             };
-            return lsetfilecon(current, target_ctx);
+            let _ = lsetfilecon(current, target_ctx);
+            return Ok(());
         }
-    } 
-    
-    // 模式 2：父级继承逻辑
-    if let Some(parent) = system_path.parent()
+    } else if let Some(parent) = system_path.parent()
         && parent.exists()
         && let Ok(parent_ctx) = lgetfilecon(parent)
         && parent_ctx != CONTEXT_ROOTFS
     {
-        return lsetfilecon(current, &parent_ctx);
+        // 尝试继承父目录
+        let guessed = guess_context_by_path(&system_path);
+        if guessed == CONTEXT_HAL && parent_ctx == CONTEXT_VENDOR {
+            let _ = lsetfilecon(current, CONTEXT_HAL);
+        } else {
+            let _ = lsetfilecon(current, &parent_ctx);
+        }
+        return Ok(());
     }
 
-    // 模式 3：启发式保底 (Guessing Logic)
     let target_context = guess_context_by_path(&system_path);
-    lsetfilecon(current, target_context)
+    let _ = lsetfilecon(current, target_context);
+    Ok(())
 }
 
 fn native_cp_r(src: &Path, dst: &Path, relative: &Path, repair: bool) -> Result<()> {
@@ -480,9 +493,12 @@ pub fn sync_dir(src: &Path, dst: &Path, repair_context: bool) -> Result<()> {
         return Ok(());
     }
     ensure_dir_exists(dst)?;
-    // 使用递归同步，并在同步过程中即时应用 SELinux 修复
     native_cp_r(src, dst, Path::new(""), repair_context).with_context(|| {
-        format!("Failed to natively sync {} to {}", src.display(), dst.display())
+        format!(
+            "Failed to natively sync {} to {}",
+            src.display(),
+            dst.display()
+        )
     })
 }
 
