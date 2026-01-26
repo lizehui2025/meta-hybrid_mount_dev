@@ -1,4 +1,6 @@
-// src/mount/magic_mount/mod.rs
+
+// Copyright 2026 Hybrid Mount Authors
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 mod utils;
 
@@ -65,7 +67,7 @@ impl MagicMount {
             NodeFileType::RegularFile => self.regular_file(),
             NodeFileType::Directory => self.directory(),
             NodeFileType::Whiteout => {
-                log::debug!("File {} is removed via whiteout", self.path.display());
+                log::debug!("file {} is removed", self.path.display());
                 Ok(())
             }
         }
@@ -75,30 +77,31 @@ impl MagicMount {
 impl MagicMount {
     fn symlink(&self) -> Result<()> {
         if let Some(module_path) = &self.node.module_path {
-            // 如果已经在 tmpfs 中，直接创建链接；否则报错（因为不能在 RO 分区创建）
             if !self.has_tmpfs {
                 bail!("Cannot create symlink {} on read-only filesystem! Parent directory needs tmpfs.", self.path.display());
             }
 
+            log::debug!(
+                "create module symlink {} -> {}",
+                module_path.display(),
+                self.work_dir_path.display()
+            );
             clone_symlink(module_path, &self.work_dir_path).with_context(|| {
-                format!("Failed to clone symlink {} to {}", module_path.display(), self.work_dir_path.display())
+                format!(
+                    "create module symlink {} -> {}",
+                    module_path.display(),
+                    self.work_dir_path.display(),
+                )
             })?;
-            
-            MOUNTED_SYMBOLS_FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mounted = MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed) + 1;
+            MOUNTED_SYMBOLS_FILES.store(mounted, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         } else {
-            bail!("System integrity error: Root symlink {} cannot be modified!", self.path.display());
+            bail!("cannot mount root symlink {}!", self.path.display());
         }
     }
 
     fn regular_file(&self) -> Result<()> {
-        if self.node.module_path.is_none() {
-            bail!("Root file {} cannot be regular_file mounted!", self.path.display());
-        }
-
-        let module_path = self.node.module_path.as_ref().unwrap();
-
-        // 确定挂载目标：如果在 tmpfs 中，挂载到工作区节点；否则挂载到真实路径
         let target = if self.has_tmpfs {
             if !self.work_dir_path.exists() {
                 fs::File::create(&self.work_dir_path)?;
@@ -108,58 +111,68 @@ impl MagicMount {
             &self.path
         };
 
-        log::debug!("Binding module file: {} -> {}", module_path.display(), target.display());
+        if self.node.module_path.is_none() {
+            bail!("cannot mount root file {}!", self.path.display());
+        }
+
+        let module_path = &self.node.module_path.clone().unwrap();
+
+        log::debug!(
+            "mount module file {} -> {}",
+            module_path.display(),
+            target.display() // use target display
+        );
 
         mount_bind(module_path, target).with_context(|| {
-            format!("Bind mount failed: {} -> {}", module_path.display(), target.display())
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            if self.umount {
+                let _ = send_umountable(target);
+            }
+            format!(
+                "mount module file {} -> {}",
+                module_path.display(),
+                target.display(),
+            )
         })?;
 
-        // 强制设置为只读，防止模块修改系统关键文件
         if let Err(e) = mount_remount(target, MountFlags::RDONLY | MountFlags::BIND, "") {
-            log::warn!("Failed to remount {} as RO: {}", target.display(), e);
+            log::warn!("make file {} ro: {e:#?}", target.display());
         }
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        if self.umount {
-            let _ = send_umountable(target);
-        }
-
-        MOUNTED_FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mounted = MOUNTED_FILES.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        MOUNTED_FILES.store(mounted, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn directory(&mut self) -> Result<()> {
-        // 核心修复：判定当前层级是否需要开启 tmpfs
         let mut tmpfs_needed = self.has_tmpfs;
 
+        // 判定逻辑修复：如果不是已经在 tmpfs 中，需要判断是否要开启 tmpfs
         if !tmpfs_needed {
-            // 只要满足以下任一条件，必须为该目录开启 tmpfs：
-            // 1. 目录被标记为 .replace (全量替换)
-            // 2. 该目录本身由模块提供 (module_path is Some)
+            // 条件1：全量替换或模块自带目录
             if self.node.replace || self.node.module_path.is_some() {
                 tmpfs_needed = true;
             } else {
-                // 3. 检查所有子项，如果子项有覆盖或新增，父项必须是 tmpfs
-                for (name, child_node) in &self.node.children {
+                // 条件2：子项目检查
+                for (name, node) in &self.node.children {
                     let real_path = self.path.join(name);
-                    
-                    let need = match child_node.file_type {
-                        NodeFileType::Symlink => true, // 软链接必须在 tmpfs 中创建
-                        NodeFileType::Whiteout => real_path.exists(), // 删除操作必须在 tmpfs 中记录
+                    let need = match node.file_type {
+                        NodeFileType::Symlink => true, // 软链接必须 tmpfs
+                        NodeFileType::Whiteout => real_path.exists(), // 删除必须 tmpfs
                         _ => {
-                            // 修正点：如果子项由模块提供，必须触发 tmpfs
-                            if child_node.module_path.is_some() {
+                             // 子项是模块提供的，或者文件类型改变，或者新增文件 -> 必须 tmpfs
+                            if node.module_path.is_some() {
                                 true
-                            } else if let Ok(meta) = real_path.symlink_metadata() {
-                                // 文件类型不一致（如 目录变文件）
-                                NodeFileType::from(meta.file_type()) != child_node.file_type
+                            } else if let Ok(metadata) = real_path.symlink_metadata() {
+                                let file_type = NodeFileType::from(metadata.file_type());
+                                file_type != node.file_type || file_type == NodeFileType::Symlink
                             } else {
-                                // 目标不存在（新增文件）
+                                // 目标不存在（新增）
                                 true
                             }
                         }
                     };
-
                     if need {
                         tmpfs_needed = true;
                         break;
@@ -167,67 +180,146 @@ impl MagicMount {
                 }
             }
         }
-
+        
+        // 如果决定开启 tmpfs 但尚未开启（即当前层级是 tmpfs 的根）
         if tmpfs_needed && !self.has_tmpfs {
-            // 仅在首次从系统分区切换到 tmpfs 时创建骨架
             utils::tmpfs_skeleton(&self.path, &self.work_dir_path, &self.node)?;
             
-            // 建立本地 bind 循环，为 mount_move 做准备
-            mount_bind(&self.work_dir_path, &self.work_dir_path)?;
+            // !!! 关键修复 !!!
+            // 在执行 mount_move 之前，源路径必须是一个挂载点。
+            // 对于普通目录，我们必须先执行一次 bind mount 自身。
+            mount_bind(&self.work_dir_path, &self.work_dir_path).with_context(|| {
+                format!(
+                    "creating tmpfs (self-bind) for {} at {}",
+                    self.path.display(),
+                    self.work_dir_path.display(),
+                )
+            })?;
         }
 
-        // 如果不是 replace 模式，需要镜像现有的系统文件
+        // 如果这不是 replace 模式，需要把原系统的文件镜像过来
         if self.path.exists() && !self.node.replace {
             self.mount_path(tmpfs_needed)?;
         }
 
-        // 递归处理子项
+        // 递归处理子节点
         for (name, node) in &self.node.children {
-            if node.skip { continue; }
-            
-            Self::new(node, &self.path, &self.work_dir_path, tmpfs_needed, self.umount)
+            if node.skip {
+                continue;
+            }
+
+            if let Err(e) = {
+                Self::new(
+                    node,
+                    &self.path,
+                    &self.work_dir_path,
+                    tmpfs_needed,
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    self.umount,
+                )
                 .do_mount()
-                .with_context(|| format!("Magic mount error at {}/{}", self.path.display(), name))?;
+            }
+            .with_context(|| format!("magic mount {}/{name}", self.path.display()))
+            {
+                // 如果已经在 tmpfs 里了，子项失败是致命的
+                if tmpfs_needed {
+                    return Err(e);
+                }
+                log::error!("mount child {}/{name} failed: {e:#?}", self.path.display());
+            }
         }
 
-        // 提交挂载：将 tmpfs 移动到真实系统位置
+        // 提交挂载：将准备好的 tmpfs 移动到系统真实路径
         if tmpfs_needed && !self.has_tmpfs {
-            log::debug!("Committing Magic Mount: moving tmpfs to {}", self.path.display());
-            
-            mount_remount(&self.work_dir_path, MountFlags::RDONLY | MountFlags::BIND, "").ok();
-            
-            mount_move(&self.work_dir_path, &self.path).with_context(|| {
-                format!("Failed to move Magic Mount tmpfs to {}", self.path.display())
-            })?;
+            log::debug!(
+                "moving tmpfs {} -> {}",
+                self.work_dir_path.display(),
+                self.path.display()
+            );
 
-            mount_change(&self.path, MountPropagationFlags::PRIVATE).ok();
+            // 设为只读
+            if let Err(e) = mount_remount(
+                &self.work_dir_path,
+                MountFlags::RDONLY | MountFlags::BIND,
+                "",
+            ) {
+                log::warn!("make dir {} ro: {e:#?}", self.path.display());
+            }
+            
+            // 移动挂载点
+            mount_move(&self.work_dir_path, &self.path).with_context(|| {
+                format!(
+                    "moving tmpfs {} -> {}",
+                    self.work_dir_path.display(),
+                    self.path.display()
+                )
+            })?;
+            
+            // 设为私有
+            if let Err(e) = mount_change(&self.path, MountPropagationFlags::PRIVATE) {
+                log::warn!("make dir {} private: {e:#?}", self.path.display());
+            }
 
             #[cfg(any(target_os = "linux", target_os = "android"))]
             if self.umount {
                 let _ = send_umountable(&self.path);
             }
         }
-
         Ok(())
     }
+}
 
+impl MagicMount {
     fn mount_path(&mut self, has_tmpfs: bool) -> Result<()> {
-        if !self.path.is_dir() { return Ok(()); }
+        // 如果路径不存在或者是文件，不需要遍历
+        if !self.path.is_dir() {
+            return Ok(()); 
+        }
 
-        for entry in fs::read_dir(&self.path)?.flatten() {
+        for entry in self.path.read_dir()?.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             
-            // 如果该文件在模块中有对应节点，由 do_mount 处理，此处跳过
-            if let Some(node) = self.node.children.remove(&name) {
-                if node.skip { continue; }
-                
-                Self::new(&node, &self.path, &self.work_dir_path, has_tmpfs, self.umount)
-                    .do_mount()?;
-            } else if has_tmpfs {
-                // 如果在 tmpfs 中且模块未修改此文件，则从原分区镜像过来
-                mount_mirror(&self.path, &self.work_dir_path, &entry)?;
+            // 如果该文件由模块提供，前面递归逻辑会处理，这里跳过
+            // 如果模块没有提供该文件，但我们需要 tmpfs（即 mirror），则执行 mount_mirror
+            let result = {
+                if let Some(node) = self.node.children.remove(&name) {
+                    if node.skip {
+                        continue;
+                    }
+                    // 这里不需要由 mount_path 调用递归 do_mount，
+                    // 因为 directory() 主逻辑里的循环会处理 self.node.children。
+                    // 但是因为我们在这里 remove 了它，所以必须在这里处理，或者改写逻辑。
+                    // 保持原逻辑结构：在这里处理并移除，防止 directory() 尾部重复处理？
+                    // 不，directory() 的循环在 mount_path 之后。
+                    // 如果在这里处理了，directory() 里的循环就拿不到 node 了（因为 remove 了）。
+                    // 这也是原代码的设计：优先处理系统里已存在的文件。
+                    
+                    Self::new(
+                        &node,
+                        &self.path,
+                        &self.work_dir_path,
+                        has_tmpfs,
+                        #[cfg(any(target_os = "linux", target_os = "android"))]
+                        self.umount,
+                    )
+                    .do_mount()
+                    .with_context(|| format!("magic mount {}/{name}", self.path.display()))
+                } else if has_tmpfs {
+                    mount_mirror(&self.path, &self.work_dir_path, &entry)
+                        .with_context(|| format!("mount mirror {}/{name}", self.path.display()))
+                } else {
+                    Ok(())
+                }
+            };
+
+            if let Err(e) = result {
+                if has_tmpfs {
+                    return Err(e);
+                }
+                log::error!("mount child {}/{name} failed: {e:#?}", self.path.display());
             }
         }
+
         Ok(())
     }
 }
@@ -239,31 +331,48 @@ pub fn magic_mount<P>(
     extra_partitions: &[String],
     need_id: HashSet<String>,
     #[cfg(any(target_os = "linux", target_os = "android"))] umount: bool,
+    #[cfg(not(any(target_os = "linux", target_os = "android")))] _umount: bool,
 ) -> Result<()>
 where
     P: AsRef<Path>,
 {
     if let Some(root) = collect_module_files(module_dir, extra_partitions, need_id)? {
+        log::debug!("collected: {root:?}");
         let tmp_root = tmp_path.as_ref();
-        let tmp_dir = tmp_root.join("magic_work");
+        let tmp_dir = tmp_root.join("workdir");
         ensure_dir_exists(&tmp_dir)?;
 
-        mount(mount_source, &tmp_dir, "tmpfs", MountFlags::empty(), Some(std::ffi::CStr::from_bytes_with_nul(b"mode=0755\0").unwrap()))?;
-        mount_change(&tmp_dir, MountPropagationFlags::PRIVATE).ok();
+        mount(mount_source, &tmp_dir, "tmpfs", MountFlags::empty(), None).context("mount tmp")?;
+        mount_change(&tmp_dir, MountPropagationFlags::PRIVATE).context("make tmp private")?;
 
-        let ret = MagicMount::new(&root, Path::new("/"), &tmp_dir, false, umount).do_mount();
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if umount {
+            let _ = send_umountable(&tmp_dir);
+        }
 
-        // 清理工作区
-        unmount(&tmp_dir, UnmountFlags::DETACH).ok();
-        fs::remove_dir_all(&tmp_dir).ok();
+        let ret = MagicMount::new(
+            &root,
+            Path::new("/"),
+            tmp_dir.as_path(),
+            false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            umount,
+        )
+        .do_mount();
 
-        log::info!("Magic Mount sequence complete. Files: {}, Symlinks: {}", 
-            MOUNTED_FILES.load(std::sync::atomic::Ordering::Relaxed),
-            MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed));
-        
+        if let Err(e) = unmount(&tmp_dir, UnmountFlags::DETACH) {
+            log::error!("failed to unmount tmp {e}");
+        }
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        try_umount::commit()?;
+        fs::remove_dir(tmp_dir).ok();
+
+        let mounted_symbols = MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed);
+        let mounted_files = MOUNTED_FILES.load(std::sync::atomic::Ordering::Relaxed);
+        log::info!("mounted files: {mounted_files}, mounted symlinks: {mounted_symbols}");
         ret
     } else {
-        log::info!("No modules qualified for Magic Mount, skipping.");
+        log::info!("no modules to mount, skipping!");
         Ok(())
     }
 }
