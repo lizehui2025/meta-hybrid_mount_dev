@@ -59,13 +59,8 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
              let _ = fs::create_dir_all(&upper);
         }
 
+        // 修复：删除了重复的重新判断块，解决了 Borrow of moved value 错误
         // 重新判断，现在 workdir 肯定是干净的
-        let (upper_opt, work_opt) = if upper.exists() && work.exists() {
-            (Some(upper), Some(work))
-        } else {
-            (None, None)
-        };
-
         let (upper_opt, work_opt) = if upper.exists() && work.exists() {
             (Some(upper), Some(work))
         } else {
@@ -77,7 +72,6 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
             op.target,
             lowerdir_strings.len()
         );
-
         match overlayfs::overlayfs::mount_overlay(
             &op.target,
             &lowerdir_strings,
