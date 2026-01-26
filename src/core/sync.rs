@@ -117,7 +117,7 @@ fn prune_orphaned_modules(modules: &[Module], target_base: &Path) -> Result<()> 
 }
 
 fn should_sync(src: &Path, dst: &Path, force: bool) -> bool {
-    // 如果强制同步标志为真，直接返回 true
+    // 如果强制同步标志为真（模式切换），或目标不存在，直接返回 true
     if force || !dst.exists() {
         return true;
     }
@@ -129,6 +129,7 @@ fn should_sync(src: &Path, dst: &Path, force: bool) -> bool {
         return true;
     }
 
+    // 仅在非强制模式下才执行内容对比
     match (fs::read(&src_prop), fs::read(&dst_prop)) {
         (Ok(s), Ok(d)) => s != d,
         _ => true,
