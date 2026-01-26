@@ -1,13 +1,14 @@
+// src/core/executor.rs
 // Copyright 2026 Hybrid Mount Developers
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    fs,
 };
 
-use anyhow::Result;
-use std::fs;
+use anyhow::{Result, anyhow};
 use crate::{
     conf::config,
     core::planner::MountPlan,
@@ -45,6 +46,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
         let upper = part_rw.join("upperdir");
         let work = part_rw.join("workdir");
 
+        // 清理脏 workdir
         if work.exists() {
             if let Err(e) = fs::remove_dir_all(&work) {
                 log::warn!("Failed to clean workdir {}: {}", work.display(), e);
@@ -59,8 +61,6 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
              let _ = fs::create_dir_all(&upper);
         }
 
-        // 修复：删除了重复的重新判断块，解决了 Borrow of moved value 错误
-        // 重新判断，现在 workdir 肯定是干净的
         let (upper_opt, work_opt) = if upper.exists() && work.exists() {
             (Some(upper), Some(work))
         } else {
@@ -72,6 +72,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
             op.target,
             lowerdir_strings.len()
         );
+
         match overlayfs::overlayfs::mount_overlay(
             &op.target,
             &lowerdir_strings,
@@ -92,18 +93,25 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
                 }
             }
             Err(e) => {
+                // !!! 关键修复：不要返回 Err，而是降级处理 !!!
                 log::warn!(
                     "OverlayFS failed for {}: {}. Fallback to Magic Mount.",
                     op.target,
                     e
                 );
+                
+                // 尝试清理可能挂载了一半的状态
+                let _ = rustix::mount::unmount(Path::new(&op.target), rustix::mount::UnmountFlags::DETACH);
+
                 for id in involved_modules {
                     final_magic_ids.insert(id);
                 }
+                // 继续执行下一个操作，不中断循环
             }
         }
     }
 
+    // 移除已经被 Magic Mount 接管的模块 ID
     final_overlay_ids.retain(|id| !final_magic_ids.contains(id));
 
     let mut magic_queue: Vec<String> = final_magic_ids.iter().cloned().collect();
@@ -111,6 +119,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
 
     if !magic_queue.is_empty() {
         let tempdir = PathBuf::from(&config.hybrid_mnt_dir).join("magic_workspace");
+        // 设置 Magic Mount 的工作区
         let _ = crate::try_umount::TMPFS.set(tempdir.to_string_lossy().to_string());
 
         log::info!(
@@ -125,6 +134,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
         let module_dir = Path::new(&config.hybrid_mnt_dir);
         let magic_need_ids: HashSet<String> = magic_queue.iter().cloned().collect();
 
+        // 即使 Magic Mount 失败，也不要让整个 Daemon 崩溃，记录错误即可
         if let Err(e) = magic_mount::magic_mount(
             &tempdir,
             module_dir,
@@ -134,6 +144,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
             !config.disable_umount,
         ) {
             log::error!("Magic Mount critical failure: {:#}", e);
+            // 清空列表以反映真实状态
             final_magic_ids.clear();
         }
     }
