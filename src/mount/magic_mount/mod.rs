@@ -10,20 +10,20 @@ use std::{
     sync::atomic::AtomicU32,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use rustix::mount::{
-    MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change, mount_move,
-    mount_remount, unmount,
+    mount, mount_bind, mount_change, mount_move, mount_remount, unmount, MountFlags,
+    MountPropagationFlags, UnmountFlags,
 };
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::try_umount::send_umountable;
+
 use crate::{
     mount::{
         magic_mount::utils::{clone_symlink, collect_module_files, mount_mirror},
         node::{Node, NodeFileType},
     },
-    try_umount,
     utils::ensure_dir_exists,
 };
 
@@ -314,6 +314,7 @@ pub fn magic_mount<P>(
 where
     P: AsRef<Path>,
 {
+    // HYBRID MOUNT: 传入 need_id 给 collect_module_files
     if let Some(root) = collect_module_files(module_dir, extra_partitions, need_id)? {
         log::debug!("collected: {root:?}");
         let tmp_root = tmp_path.as_ref();
@@ -341,8 +342,9 @@ where
         if let Err(e) = unmount(&tmp_dir, UnmountFlags::DETACH) {
             log::error!("failed to unmount tmp {e}");
         }
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        try_umount::commit()?;
+        
+        // 注意：这里移除了 mmrs 中的 ksu.umount 提交，因为 hybrid 的 executor.rs 会在最后统一处理 commit。
+        
         fs::remove_dir(tmp_dir).ok();
 
         let mounted_symbols = MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed);
