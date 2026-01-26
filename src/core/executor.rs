@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
-
+use std::fs;
 use crate::{
     conf::config,
     core::planner::MountPlan,
@@ -44,6 +44,27 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
         let part_rw = rw_root.join(&op.partition_name);
         let upper = part_rw.join("upperdir");
         let work = part_rw.join("workdir");
+
+        if work.exists() {
+            if let Err(e) = fs::remove_dir_all(&work) {
+                log::warn!("Failed to clean workdir {}: {}", work.display(), e);
+            }
+            if let Err(e) = fs::create_dir_all(&work) {
+                log::warn!("Failed to recreate workdir {}: {}", work.display(), e);
+            }
+        }
+        
+        // 确保 upperdir 存在
+        if !upper.exists() {
+             let _ = fs::create_dir_all(&upper);
+        }
+
+        // 重新判断，现在 workdir 肯定是干净的
+        let (upper_opt, work_opt) = if upper.exists() && work.exists() {
+            (Some(upper), Some(work))
+        } else {
+            (None, None)
+        };
 
         let (upper_opt, work_opt) = if upper.exists() && work.exists() {
             (Some(upper), Some(work))
