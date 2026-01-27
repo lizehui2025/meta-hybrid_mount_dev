@@ -55,25 +55,15 @@ impl MountController<Init> {
         }
     }
 
-    pub fn init_storage(
+pub fn init_storage(
         self,
         mnt_base: &Path,
-        img_path: &Path,
     ) -> Result<MountController<StorageReady>> {
+        // 调用重构后的 setup，只需 3 个参数
         let handle = storage::setup(
             mnt_base,
-            img_path,
-            &self.config.moduledir,
-            matches!(
-                self.config.overlay_mode,
-                crate::conf::config::OverlayMode::Ext4
-            ),
-            matches!(
-                self.config.overlay_mode,
-                crate::conf::config::OverlayMode::Erofs
-            ),
+            &self.config.overlay_mode,
             &self.config.mountsource,
-            self.config.disable_umount,
         )?;
 
         log::info!(">> Storage Backend: [{}]", handle.mode.to_uppercase());
