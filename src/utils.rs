@@ -508,6 +508,42 @@ fn iterative_sync(src: &Path, dst: &Path, repair: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn detect_all_partitions() -> Result<Vec<String>> {
+    let mut partitions = Vec::new();
+    let mountinfo = procfs::process::Process::myself()?.mountinfo()?;
+
+    // 定义需要排除的非系统分区前缀
+    let excludes = ["/data", "/dev", "/proc", "/sys", "/mnt", "/storage", "/apex"];
+
+    for mnt in mountinfo.0 {
+        let path = mnt.mount_point.to_string_lossy();
+        let fstype = mnt.fs_type.to_string_lossy();
+
+        // 逻辑：必须是根目录下的第一级目录，且文件系统属于物理分区类型
+        if path.starts_with('/') && path.split('/').count() == 2 {
+            let name = path.trim_start_matches('/');
+            if name.is_empty() { continue; }
+
+            // 过滤掉不需要的路径
+            if excludes.iter().any(|&ex| path.starts_with(ex)) {
+                continue;
+            }
+
+            // 只接受常见的物理分区文件系统
+            match fstype.as_ref() {
+                "ext4" | "erofs" | "f2fs" => {
+                    partitions.push(name.to_string());
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    partitions.sort();
+    partitions.dedup();
+    Ok(partitions)
+}
+
 fn native_cp_r(src: &Path, dst: &Path, relative: &Path, repair: bool) -> Result<()> {
     if !dst.exists() {
         if src.is_dir() {
