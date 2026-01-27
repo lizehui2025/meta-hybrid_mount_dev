@@ -9,7 +9,7 @@ use std::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
     },
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{OnceLock, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
@@ -454,7 +454,8 @@ impl<T, E: std::fmt::Display> WarnErr for Result<T, E> {
 }
 
 fn iterative_sync(src: &Path, dst: &Path, repair: bool) -> Result<()> {
-    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf(), PathBuf::new())];
+    // 显式指定 Vec 的元组类型
+    let mut stack: Vec<(PathBuf, PathBuf, PathBuf)> = vec![(src.to_path_buf(), dst.to_path_buf(), PathBuf::new())];
 
     while let Some((curr_src, curr_dst, rel_path)) = stack.pop() {
         if !curr_dst.exists() {
