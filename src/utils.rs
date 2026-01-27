@@ -91,27 +91,34 @@ pub fn init_logging(verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// 原子性写入文件，包含清理守卫
 pub fn atomic_write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let temp_name = format!(".{}_{}.tmp", pid, now);
+    let temp_name = format!(".mhm_tmp_{}_{}.tmp", std::process::id(), 
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos());
     let temp_file = dir.join(temp_name);
+
+    // 清理守卫：如果函数中途出错，自动删除临时文件
+    struct CleanupGuard<'a>(&'a Path);
+    impl Drop for CleanupGuard<'_> {
+        fn drop(&mut self) { let _ = fs::remove_file(self.0); }
+    }
+    let guard = CleanupGuard(&temp_file);
 
     {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temp_file)?;
+            .open(&temp_file)
+            .context("Failed to create temporary file for atomic write")?;
         file.write_all(content.as_ref())?;
+        file.sync_all()?; // 确保数据落盘
     }
 
-    fs::rename(&temp_file, path)?;
+    fs::rename(&temp_file, path).context("Failed to rename atomic temporary file")?;
+    std::mem::forget(guard); // 成功后释放守卫，不执行 drop
     Ok(())
 }
 
@@ -134,26 +141,27 @@ pub fn check_zygisksu_enforce_status() -> bool {
 fn copy_extended_attributes(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        // 1. 同步 SELinux 上下文
         if let Ok(mut ctx) = lgetfilecon(src) {
-            if ctx.contains("u:object_r:rootfs:s0") {
+            if ctx.contains(CONTEXT_ROOTFS) {
                 ctx = CONTEXT_SYSTEM.to_string();
             }
-            let _ = lsetfilecon(dst, &ctx);
-        } else {
-            let _ = lsetfilecon(dst, CONTEXT_SYSTEM);
+            lsetfilecon(dst, &ctx).warn_on_err();
         }
+
+        // 2. 同步 OverlayFS 不透明属性
         if let Ok(opaque) = lgetxattr(src, OVERLAY_OPAQUE_XATTR) {
-            let _ = lsetxattr(dst, OVERLAY_OPAQUE_XATTR, &opaque, XattrFlags::empty());
+            lsetxattr(dst, OVERLAY_OPAQUE_XATTR, &opaque, XattrFlags::empty())
+                .context("Failed to set opaque xattr")?;
         }
+
+        // 3. 同步其他受信任的 Overlay 属性
         if let Ok(xattrs) = llistxattr(src) {
             for xattr_name in xattrs {
-                let name_bytes = xattr_name.as_bytes();
-                let name_str = String::from_utf8_lossy(name_bytes);
-
-                #[allow(clippy::collapsible_if)]
+                let name_str = String::from_utf8_lossy(xattr_name.as_bytes());
                 if name_str.starts_with("trusted.overlay.") && name_str != OVERLAY_OPAQUE_XATTR {
                     if let Ok(val) = lgetxattr(src, &xattr_name) {
-                        let _ = lsetxattr(dst, &xattr_name, &val, XattrFlags::empty());
+                        lsetxattr(dst, &xattr_name, &val, XattrFlags::empty()).ok();
                     }
                 }
             }
@@ -489,16 +497,10 @@ fn native_cp_r(src: &Path, dst: &Path, relative: &Path, repair: bool) -> Result<
 }
 
 pub fn sync_dir(src: &Path, dst: &Path, repair_context: bool) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
+    if !src.exists() { return Ok(()); }
     ensure_dir_exists(dst)?;
-    native_cp_r(src, dst, Path::new(""), repair_context).with_context(|| {
-        format!(
-            "Failed to natively sync {} to {}",
-            src.display(),
-            dst.display()
-        )
+    iterative_sync(src, dst, repair_context).with_context(|| {
+        format!("Failed to sync {} to {}", src.display(), dst.display())
     })
 }
 
