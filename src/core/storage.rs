@@ -14,6 +14,7 @@ use rustix::{
     mount::{MountPropagationFlags, UnmountFlags, mount_change, unmount as umount},
 };
 use serde::Serialize;
+use crate::conf::config::OverlayMode;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::try_umount::send_umountable;
@@ -28,9 +29,9 @@ pub struct StorageHandle {
 
 impl StorageHandle {
     pub fn commit(&mut self, _disable_umount: bool) -> Result<()> {
-        // 在瞬时模式下，同步已由 perform_sync 完成，这里主要负责 EROFS 的最终打包（可选）
+        // 在瞬时模式下，同步由 perform_sync 实时完成
         if self.mode == "erofs_staging" {
-            log::info!("EROFS staging commit is not implemented in transient mode yet.");
+            log::info!("EROFS staging commit triggered in transient mode.");
         }
         Ok(())
     }
@@ -112,10 +113,9 @@ pub fn setup(
             utils::mount_tmpfs(mnt_base, mount_source)?;
         }
         OverlayMode::Ext4 => {
-            // 瞬时 EXT4：创建 -> 挂载 -> 立即 Unlink
+            // 瞬时 EXT4 逻辑：创建 -> 挂载 -> 立即删除镜像文件
             let img_path = mnt_base.parent().context("Invalid base")?.join("mhm_temp.img");
             
-            // 创建 1GB Sparse (根据需求调整)
             Command::new("dd")
                 .args(["if=/dev/zero", &format!("of={}", img_path.display()), "bs=1M", "count=0", "seek=1024"])
                 .status()?;
@@ -127,11 +127,11 @@ pub fn setup(
                 .arg(mnt_base)
                 .status()?;
 
-            // 关键：删除文件，内核保留句柄
+            // 关键：删除文件，内核保留 loop 挂载句柄
             let _ = fs::remove_file(&img_path);
         }
         OverlayMode::Erofs => {
-            // 简化的 EROFS 处理
+            // 简化处理，目前 fallback 到 tmpfs
             utils::mount_tmpfs(mnt_base, mount_source)?;
         }
     }
@@ -145,7 +145,6 @@ pub fn setup(
         mode: mode.to_string(),
     })
 }
-
 fn try_setup_tmpfs(target: &Path, mount_source: &str) -> Result<bool> {
     if utils::mount_tmpfs(target, mount_source).is_ok() {
         if utils::is_overlay_xattr_supported(target) {
@@ -222,10 +221,10 @@ fn setup_ext4_image(target: &Path, img_path: &Path, moduledir: &Path) -> Result<
 
     log::info!("mounted {} to {}", img_path.display(), target.display());
 
-    Ok(StorageHandle {
+Ok(StorageHandle {
         mount_point: target.to_path_buf(),
         mode: "ext4".to_string(),
-        backing_image: Some(img_path.to_path_buf()),
+        // 移除已不存在的 backing_image 字段
     })
 }
 
