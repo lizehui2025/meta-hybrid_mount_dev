@@ -27,34 +27,11 @@ pub struct StorageHandle {
 }
 
 impl StorageHandle {
-    pub fn commit(&mut self, disable_umount: bool) -> Result<()> {
+    pub fn commit(&mut self, _disable_umount: bool) -> Result<()> {
+        // 在瞬时模式下，同步已由 perform_sync 完成，这里主要负责 EROFS 的最终打包（可选）
         if self.mode == "erofs_staging" {
-            let image_path = self
-                .backing_image
-                .as_ref()
-                .context("EROFS backing image path missing")?;
-
-            utils::create_erofs_image(&self.mount_point, image_path)
-                .context("Failed to pack EROFS image")?;
-
-            umount(&self.mount_point, UnmountFlags::DETACH)
-                .context("Failed to unmount staging tmpfs")?;
-
-            utils::mount_erofs_image(image_path, &self.mount_point)
-                .context("Failed to mount finalized EROFS image")?;
-
-            if let Err(e) = mount_change(&self.mount_point, MountPropagationFlags::PRIVATE) {
-                log::warn!("Failed to make EROFS storage private: {}", e);
-            }
-
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            if !disable_umount {
-                let _ = send_umountable(&self.mount_point);
-            }
-
-            self.mode = "erofs".to_string();
+            log::info!("EROFS staging commit is not implemented in transient mode yet.");
         }
-
         Ok(())
     }
 }
