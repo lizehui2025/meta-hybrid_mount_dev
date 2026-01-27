@@ -49,17 +49,14 @@ pub struct MountController<S> {
 
 impl MountController<Init> {
     pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            state: Init,
-        }
+        Self { config, state: Init }
     }
 
-pub fn init_storage(
+    // 确保这里只接收 mnt_base
+    pub fn init_storage(
         self,
         mnt_base: &Path,
     ) -> Result<MountController<StorageReady>> {
-        // 调用重构后的 setup，只需 3 个参数
         let handle = storage::setup(
             mnt_base,
             &self.config.overlay_mode,
