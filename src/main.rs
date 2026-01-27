@@ -158,7 +158,7 @@ fn main() -> Result<()> {
     }
 
     MountController::new(config)
-        .init_storage(&mnt_base, &img_path)
+        .init_storage(&mnt_base) // 修改点：现在只接受 1 个参数 mnt_base
         .context("Failed to initialize storage")?
         .scan_and_sync()
         .context("Failed to scan and sync modules")?
