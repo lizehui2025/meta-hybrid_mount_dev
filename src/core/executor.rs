@@ -128,7 +128,7 @@ pub fn execute(plan: &MountPlan, config: &config::Config) -> Result<ExecutionRes
         let magic_need_set: HashSet<String> = magic_queue.iter().cloned().collect();
 
         // Magic Mount 失败现在被视为严重错误，会中断流程
-        magic_mount::magic_mount(
+        crate::mount::magic_mount::magic_mount(
             &tempdir,
             module_dir,
             &config.mountsource,
