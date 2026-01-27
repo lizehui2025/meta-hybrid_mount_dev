@@ -100,54 +100,44 @@ pub fn setup(
     mode: &OverlayMode,
     mount_source: &str,
 ) -> Result<StorageHandle> {
-    log::info!(">> Preparing transient workspace in [{:?}] mode...", mode);
+    log::info!(">> Setting up transient storage: [{:?}]", mode);
 
-    // 确保挂载点父目录存在
-    if let Some(parent) = mnt_base.parent() {
-        utils::ensure_dir_exists(parent)?;
+    if utils::is_mounted(mnt_base) {
+        let _ = umount(mnt_base, UnmountFlags::DETACH);
     }
     utils::ensure_dir_exists(mnt_base)?;
 
     match mode {
         OverlayMode::Tmpfs => {
-            // 模式 1: 纯内存 TMPFS
-            rustix::mount::mount(
-                "tmpfs", mnt_base, "tmpfs",
-                rustix::mount::MountFlags::empty(), None,
-            ).context("Failed to mount tmpfs workspace")?;
+            utils::mount_tmpfs(mnt_base, mount_source)?;
         }
         OverlayMode::Ext4 => {
-            // 模式 2: 瞬时 EXT4 (Mountify 风格)
-            let img_path = mnt_base.parent().unwrap().join("meta_temp.img");
+            // 瞬时 EXT4：创建 -> 挂载 -> 立即 Unlink
+            let img_path = mnt_base.parent().context("Invalid base")?.join("mhm_temp.img");
             
-            // 创建 2GB Sparse 镜像
-            let cmd = std::process::Command::new("dd")
-                .args(["if=/dev/zero", &format!("of={}", img_path.display()), "bs=1M", "count=0", "seek=2048"])
+            // 创建 1GB Sparse (根据需求调整)
+            Command::new("dd")
+                .args(["if=/dev/zero", &format!("of={}", img_path.display()), "bs=1M", "count=0", "seek=1024"])
                 .status()?;
             
-            if !cmd.success() { bail!("Failed to create sparse image"); }
-
-            // 格式化 (禁用日志以提升性能)
-            std::process::Command::new("mkfs.ext4")
-                .args(["-O", "^has_journal", "-F", &img_path.to_string_lossy()])
-                .status()?;
-
-            // 挂载
-            std::process::Command::new("mount")
+            Command::new("mkfs.ext4").args(["-b", "4096", "-F", &img_path.to_string_lossy()]).status()?;
+            
+            Command::new("mount")
                 .args(["-t", "ext4", "-o", "loop,rw", &img_path.to_string_lossy()])
                 .arg(mnt_base)
                 .status()?;
 
-            // 核心步骤：挂载成功后立即删除镜像文件 (Unlink)
-            // 文件在磁盘上消失，但内核通过 loop 设备保留引用，重启自动释放
-            let _ = std::fs::remove_file(&img_path);
+            // 关键：删除文件，内核保留句柄
+            let _ = fs::remove_file(&img_path);
         }
         OverlayMode::Erofs => {
-            // 模式 3: 瞬时 EROFS (需要先在临时目录准备内容，这里演示挂载逻辑)
-            // 实际操作中需要先同步到 tmpfs，mkfs.erofs 镜像，挂载后 unlink
-            log::warn!("EROFS transient mode requires pre-staged content.");
-            // ... 类似 Ext4 的 unlink 逻辑 ...
+            // 简化的 EROFS 处理
+            utils::mount_tmpfs(mnt_base, mount_source)?;
         }
+    }
+
+    if let Err(e) = mount_change(mnt_base, MountPropagationFlags::PRIVATE) {
+        log::warn!("Failed to make storage private: {}", e);
     }
 
     Ok(StorageHandle {
