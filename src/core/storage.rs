@@ -142,7 +142,7 @@ pub fn setup(
 
     Ok(StorageHandle {
         mount_point: mnt_base.to_path_buf(),
-        mode: mode.to_string(),
+        mode: format!("{:?}", mode).to_lowercase(), 
     })
 }
 fn try_setup_tmpfs(target: &Path, mount_source: &str) -> Result<bool> {
