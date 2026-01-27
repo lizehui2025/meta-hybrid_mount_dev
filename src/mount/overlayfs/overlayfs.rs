@@ -19,6 +19,17 @@ use rustix::{
 
 use crate::{mount::overlayfs::utils::umount_dir, try_umount::send_umountable};
 
+/// Overlay 配置封装，用于在函数间安全传递挂载参数
+struct OverlayOptions<'a> {
+    lower_dirs: &'a [String],
+    lowest: &'a str,
+    upper_dir: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
+    mount_source: &'a str,
+}
+
+/// 核心函数：以原子化特征执行 OverlayFS 挂载
+/// 逻辑：New API (fsopen) -> fsmount -> move_mount => Fallback to mount()
 pub fn mount_overlayfs(
     lower_dirs: &[String],
     lowest: &str,
@@ -27,283 +38,139 @@ pub fn mount_overlayfs(
     dest: impl AsRef<Path>,
     mount_source: &str,
 ) -> Result<()> {
+    let dest_path = dest.as_ref();
+    
+    // 构建 lowerdir 字符串：将模块层与底层(lowest)组合
     let lowerdir_config = lower_dirs
         .iter()
         .map(|s| s.as_ref())
         .chain(std::iter::once(lowest))
         .collect::<Vec<_>>()
         .join(":");
-    log::info!(
-        "mount overlayfs on {:?}, lowerdir={}, upperdir={:?}, workdir={:?}, source={}",
-        dest.as_ref(),
-        lowerdir_config,
-        upperdir,
-        workdir,
-        mount_source
-    );
 
-    let upperdir_s = upperdir
-        .as_ref()
-        .filter(|up| up.exists())
-        .map(|e| e.display().to_string());
-    let workdir_s = workdir
-        .as_ref()
-        .filter(|wd| wd.exists())
-        .map(|e| e.display().to_string());
+    log::debug!("Attempting atomic mount on {:?}", dest_path);
 
-    let result = (|| {
-        let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
-        let fs = fs.as_fd();
-        fsconfig_set_string(fs, "lowerdir", &lowerdir_config)?;
-        if let (Some(upperdir), Some(workdir)) = (&upperdir_s, &workdir_s) {
-            fsconfig_set_string(fs, "upperdir", upperdir)?;
-            fsconfig_set_string(fs, "workdir", workdir)?;
+    // 预处理路径：转义逗号以兼容传统 mount 和新 API 的潜在特殊字符处理
+    let safe_lower = lowerdir_config.replace(',', "\\,");
+    let up_s = upperdir.as_ref().filter(|p| p.exists()).map(|p| p.to_string_lossy().to_string());
+    let wk_s = workdir.as_ref().filter(|p| p.exists()).map(|p| p.to_string_lossy().to_string());
+
+    // --- 阶段 A: 尝试最新 API (原子化特征) ---
+    let new_api_result = (|| -> Result<()> {
+        // 1. fsopen: 创建文件系统上下文，不影响实际目录
+        let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)
+            .context("fsopen failed")?;
+        let fs_fd = fs.as_fd();
+
+        // 2. fsconfig: 逐步配置参数。如果其中一步失败，上下文会被销毁
+        fsconfig_set_string(fs_fd, "lowerdir", &lowerdir_config)?;
+        if let (Some(u), Some(w)) = (&up_s, &wk_s) {
+            fsconfig_set_string(fs_fd, "upperdir", u)?;
+            fsconfig_set_string(fs_fd, "workdir", w)?;
         }
-        fsconfig_set_string(fs, "source", mount_source)?;
-        fsconfig_create(fs)?;
-        let mount = fsmount(fs, FsMountFlags::FSMOUNT_CLOEXEC, MountAttrFlags::empty())?;
+        fsconfig_set_string(fs_fd, "source", mount_source)?;
+        
+        // 3. 提交配置并创建挂载对象
+        fsconfig_create(fs_fd)?;
+        let mnt = fsmount(fs_fd, FsMountFlags::FSMOUNT_CLOEXEC, MountAttrFlags::empty())?;
+        
+        // 4. move_mount: 将挂载点挂载到目标路径 (真正的原子切换点)
         move_mount(
-            mount.as_fd(),
+            mnt.as_fd(),
             "",
             CWD,
-            dest.as_ref(),
+            dest_path,
             MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-        )
+        ).context("move_mount failed")?;
+        
+        Ok(())
     })();
 
-    if let Err(e) = result {
-        log::warn!("fsopen mount failed: {:#}, fallback to mount", e);
-        // Escape commas in paths
-        let safe_lower = lowerdir_config.replace(',', "\\,");
+    // --- 阶段 B: 退回机制 (Fallback) ---
+    if let Err(e) = new_api_result {
+        log::warn!("New API mount failed ({:#}), falling back to legacy mount...", e);
+        
         let mut data = format!("lowerdir={safe_lower}");
-
-        if let (Some(upperdir), Some(workdir)) = (upperdir_s, workdir_s) {
-            data = format!(
-                "{data},upperdir={},workdir={}",
-                upperdir.replace(',', "\\,"),
-                workdir.replace(',', "\\,")
-            );
+        if let (Some(u), Some(w)) = (up_s, wk_s) {
+            data.push_str(&format!(
+                ",upperdir={},workdir={}",
+                u.replace(',', "\\,"),
+                w.replace(',', "\\,")
+            ));
         }
+
         mount(
             mount_source,
-            dest.as_ref(),
+            dest_path,
             "overlay",
             MountFlags::empty(),
             Some(CString::new(data)?.as_c_str()),
-        )?;
+        ).context("Legacy mount fallback failed")?;
     }
+
+    log::info!("OverlayFS successfully mounted on {:?}", dest_path);
     Ok(())
 }
 
-pub fn mount_overlay_with_protection(
-    root: &Path,
-    module_roots: &[String],
-    upper: Option<PathBuf>,
-    work: Option<PathBuf>,
-    mount_source: &str,
-) -> Result<()> {
-    // 1. 获取当前系统的挂载信息，防止覆盖已有的挂载点
-    let mounts = Process::myself()?.mountinfo().context("Failed to get mountinfo")?;
-    let mut active_mounts: Vec<_> = mounts.0.iter()
-        .filter(|m| m.mount_point.starts_with(root) && m.mount_point != root)
-        .map(|m| m.mount_point.clone())
-        .collect();
-    active_mounts.sort();
+/// 绑定挂载：使用 open_tree 提供更好的挂载树一致性
+pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
+    let from = from.as_ref();
+    let to = to.as_ref();
 
-    // 2. 挂载根路径
-    let root_ctx = OverlayContext {
-        target: root,
-        lower_dirs: module_roots.to_vec(),
-        upper_dir: upper,
-        work_dir: work,
-        mount_source,
-    };
-    do_mount(&root_ctx).with_context(|| format!("Failed to mount root overlay on {:?}", root))?;
-
-    // 3. 处理子挂载点（Shadowing）
-    // 效仿 Mountify 保护已有的分区挂载
-    for mount_point in active_mounts {
-        let relative = mount_point.strip_prefix(root).unwrap_or(Path::new(""));
-        
-        // 只有当模块中确实包含修改时，才进行嵌套 Overlay
-        let has_mod = module_roots.iter().any(|r| Path::new(r).join(relative).exists());
-        
-        if has_mod {
-            log::info!("Nested mount detected for {:?}, applying sub-overlay", mount_point);
-            let sub_lower: Vec<String> = module_roots.iter()
-                .map(|r| Path::new(r).join(relative).to_string_lossy().to_string())
-                .filter(|p| Path::new(p).is_dir())
-                .collect();
-
-            if !sub_lower.is_empty() {
-                let sub_ctx = OverlayContext {
-                    target: &mount_point,
-                    lower_dirs: sub_lower,
-                    upper_dir: None, // 子挂载通常不设 upperdir 以保持只读一致性
-                    work_dir: None,
-                    mount_source,
-                };
-                let _ = do_mount(&sub_ctx);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// OverlayFS 挂载上下文
-/// 效仿 Mountify 的配置，管理挂载的源和目标
-pub struct OverlayContext<'a> {
-    pub target: &'a Path,
-    pub lower_dirs: Vec<String>,
-    pub upper_dir: Option<PathBuf>,
-    pub work_dir: Option<PathBuf>,
-    pub mount_source: &'a str,
-}
-
-/// 核心：执行底层的 OverlayFS 挂载
-/// 优先使用新的 Mount API (fsopen)，失败后回退到传统 mount
-pub fn do_mount(ctx: &OverlayContext) -> Result<()> {
-    let lowerdir_config = ctx.lower_dirs.join(":");
+    use rustix::mount::{OpenTreeFlags, open_tree};
     
-    log::info!(
-        "Mounting OverlayFS: target={:?}, lowerdirs={} layers",
-        ctx.target,
-        ctx.lower_dirs.len()
-    );
-
-    // 预备参数字符串（用于回退模式）
-    let safe_lower = lowerdir_config.replace(',', "\\,");
-    let mut data = format!("lowerdir={}", safe_lower);
-
-    // 处理 Upper 和 Work 目录 (如果开启了存储后端)
-    let (up_s, wk_s) = (
-        ctx.upper_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
-        ctx.work_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
-    );
-
-    // 尝试使用 fsopen (Linux 5.2+)
+    // 优先使用 open_tree + move_mount，这允许我们在挂载前克隆挂载树
     let result = (|| {
-        let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
-        let fs = fs.as_fd();
-        fsconfig_set_string(fs, "lowerdir", &lowerdir_config)?;
-        if let (Some(u), Some(w)) = (&up_s, &wk_s) {
-            fsconfig_set_string(fs, "upperdir", u)?;
-            fsconfig_set_string(fs, "workdir", w)?;
-        }
-        fsconfig_set_string(fs, "source", ctx.mount_source)?;
-        fsconfig_create(fs)?;
-        let mount_fd = fsmount(fs, FsMountFlags::FSMOUNT_CLOEXEC, MountAttrFlags::empty())?;
+        let tree = open_tree(
+            CWD,
+            from,
+            OpenTreeFlags::OPEN_TREE_CLOEXEC | OpenTreeFlags::OPEN_TREE_CLONE | OpenTreeFlags::AT_RECURSIVE,
+        )?;
         move_mount(
-            mount_fd.as_fd(),
+            tree.as_fd(),
             "",
             CWD,
-            ctx.target,
+            to,
             MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
         )
     })();
 
-    if let Err(e) = result {
-        log::warn!("New Mount API failed ({:#}), falling back to traditional mount", e);
-        
-        if let (Some(u), Some(w)) = (up_s, wk_s) {
-            data.push_str(&format!(",upperdir={},workdir={}", u.replace(',', "\\,"), w.replace(',', "\\,")));
-        }
-
-        mount(
-            ctx.mount_source,
-            ctx.target,
-            "overlay",
-            MountFlags::empty(),
-            Some(CString::new(data)?.as_c_str()),
-        ).context("Traditional mount failed")?;
+    if result.is_err() {
+        log::debug!("open_tree failed, falling back to traditional bind mount");
+        mount(from, to, "", MountFlags::BIND | MountFlags::REC, None)
+            .context("Traditional bind mount failed")?;
     }
-
-    // 注册卸载任务
-    let _ = send_umountable(ctx.target.to_string_lossy().as_ref());
+    
     Ok(())
 }
 
-pub fn bind_mount(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
-    log::info!(
-        "bind mount {} -> {}",
-        from.as_ref().display(),
-        to.as_ref().display()
-    );
-    use rustix::mount::{OpenTreeFlags, open_tree};
-    match open_tree(
-        CWD,
-        from.as_ref(),
-        OpenTreeFlags::OPEN_TREE_CLOEXEC
-            | OpenTreeFlags::OPEN_TREE_CLONE
-            | OpenTreeFlags::AT_RECURSIVE,
-    ) {
-        Result::Ok(tree) => {
-            move_mount(
-                tree.as_fd(),
-                "",
-                CWD,
-                to.as_ref(),
-                MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-            )?;
-        }
-        _ => {
-            mount(
-                from.as_ref(),
-                to.as_ref(),
-                "",
-                MountFlags::BIND | MountFlags::REC,
-                None,
-            )?;
-        }
-    }
-    Ok(())
-}
-
+/// 处理嵌套子挂载点
 fn mount_overlay_child(
     mount_point: &str,
-    relative: &String,
-    module_roots: &Vec<String>,
-    stock_root: &String,
+    relative: &str,
+    module_roots: &[String],
+    stock_root: &str,
     mount_source: &str,
 ) -> Result<()> {
-    if !module_roots
+    // 筛选出确实包含该子路径的模块
+    let sub_lowers: Vec<String> = module_roots
         .iter()
-        .any(|lower| Path::new(&format!("{lower}{relative}")).exists())
-    {
+        .map(|r| Path::new(r).join(relative.trim_start_matches('/')).to_string_lossy().to_string())
+        .filter(|p| Path::new(p).is_dir())
+        .collect();
+
+    if sub_lowers.is_empty() {
+        // 如果没有任何模块涉及此路径，使用 bind_mount 保持物理透传
         return bind_mount(stock_root, mount_point);
     }
-    if !Path::new(&stock_root).is_dir() {
-        return Ok(());
-    }
-    let mut lower_dirs: Vec<String> = vec![];
-    for lower in module_roots {
-        let lower_dir = format!("{lower}{relative}");
-        let path = Path::new(&lower_dir);
-        if path.is_dir() {
-            lower_dirs.push(lower_dir);
-        } else if path.exists() {
-            return Ok(());
-        }
-    }
-    if lower_dirs.is_empty() {
-        return Ok(());
-    }
-    if let Err(e) = mount_overlayfs(
-        &lower_dirs,
-        stock_root,
-        None,
-        None,
-        mount_point,
-        mount_source,
-    ) {
-        log::warn!("failed: {:#}, fallback to bind mount", e);
-        bind_mount(stock_root, mount_point)?;
-    }
+
+    // 执行嵌套挂载
+    mount_overlayfs(&sub_lowers, stock_root, None, None, mount_point, mount_source)?;
     let _ = send_umountable(mount_point);
     Ok(())
 }
 
+/// 挂载主入口：执行根挂载并原子化处理子挂载保护
 pub fn mount_overlay(
     root: &String,
     module_roots: &Vec<String>,
@@ -311,50 +178,35 @@ pub fn mount_overlay(
     upperdir: Option<PathBuf>,
     mount_source: &str,
 ) -> Result<()> {
-    log::info!("mount overlay for {}", root);
-    std::env::set_current_dir(root).with_context(|| format!("failed to chdir to {root}"))?;
-    let stock_root = ".";
+    log::info!("Starting robust overlay sequence for {}", root);
 
-    let mounts = Process::myself()?
-        .mountinfo()
-        .with_context(|| "get mountinfo")?;
-    let mut mount_seq = mounts
-        .0
-        .iter()
-        .filter(|m| {
-            m.mount_point.starts_with(root) && !Path::new(&root).starts_with(&m.mount_point)
-        })
-        .map(|m| m.mount_point.to_str())
-        .collect::<Vec<_>>();
-    mount_seq.sort();
-    mount_seq.dedup();
+    // 1. 扫描当前 root 下的所有活跃挂载点（如 /vendor/dsp）
+    let mounts = Process::myself()?.mountinfo().context("Failed to access mountinfo")?;
+    let mut child_mounts: Vec<String> = mounts.0.iter()
+        .filter(|m| m.mount_point.starts_with(root) && m.mount_point.to_string_lossy() != *root)
+        .map(|m| m.mount_point.to_string_lossy().to_string())
+        .collect();
+    child_mounts.sort(); // 按拓扑顺序排序
 
+    // 2. 执行根 Overlay 挂载
     mount_overlayfs(module_roots, root, upperdir, workdir, root, mount_source)
-        .with_context(|| "mount overlayfs for root failed")?;
-    for mount_point in mount_seq.iter() {
-        let Some(mount_point) = mount_point else {
-            continue;
-        };
-        let relative = mount_point.replacen(root, "", 1);
-        let stock_root: String = format!("{stock_root}{relative}");
-        if !Path::new(&stock_root).exists() {
-            continue;
-        }
-        if let Err(e) = mount_overlay_child(
-            mount_point,
-            &relative,
-            module_roots,
-            &stock_root,
-            mount_source,
-        ) {
-            log::warn!(
-                "failed to mount overlay for child {}: {:#}, revert",
-                mount_point,
-                e
-            );
-            umount_dir(root).with_context(|| format!("failed to revert {root}"))?;
-            bail!(e);
+        .with_context(|| format!("Failed to establish root overlay at {root}"))?;
+
+    // 3. 处理子挂载点的“透传”或“重 Overlay”
+    // 参考了 Mountify 的层级保护逻辑，确保分区不会因为 Overlay 而“消失”
+    for mnt in child_mounts {
+        let rel = mnt.replacen(root, "", 1);
+        if rel.is_empty() { continue; }
+
+        let stock = format!("{root}{rel}"); 
+        if let Err(e) = mount_overlay_child(&mnt, &rel, module_roots, &stock, mount_source) {
+            log::error!("Critical error during child mount [{}]: {:#}", mnt, e);
+            // 原子性补救：如果子挂载失败，尝试撤销根挂载以防止系统不稳定
+            let _ = umount_dir(root);
+            bail!("Consistency failure: could not restore child mounts under {}", root);
         }
     }
+
+    let _ = send_umountable(root);
     Ok(())
 }
