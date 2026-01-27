@@ -446,6 +446,67 @@ fn apply_system_context(current: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
+trait WarnErr { fn warn_on_err(self); }
+impl<T, E: std::fmt::Display> WarnErr for Result<T, E> {
+    fn warn_on_err(self) {
+        if let Err(e) = self { log::warn!("Suppressed error: {}", e); }
+    }
+}
+
+fn iterative_sync(src: &Path, dst: &Path, repair: bool) -> Result<()> {
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf(), PathBuf::new())];
+
+    while let Some((curr_src, curr_dst, rel_path)) = stack.pop() {
+        if !curr_dst.exists() {
+            if curr_src.is_dir() {
+                create_dir_all(&curr_dst)?;
+            }
+            if let Ok(src_meta) = curr_src.metadata() {
+                let _ = fs::set_permissions(&curr_dst, src_meta.permissions());
+            }
+
+            if repair {
+                let _ = apply_system_context(&curr_dst, &rel_path);
+            } else {
+                let _ = copy_extended_attributes(&curr_src, &curr_dst);
+            }
+        }
+
+        if curr_src.is_dir() {
+            for entry in fs::read_dir(&curr_src)? {
+                let entry = entry?;
+                let s = entry.path();
+                let name = entry.file_name();
+                let d = curr_dst.join(&name);
+                let next_rel = rel_path.join(&name);
+                
+                let metadata = entry.metadata()?;
+                let ft = metadata.file_type();
+
+                // 处理不同类型的文件
+                if ft.is_dir() {
+                    stack.push((s, d, next_rel));
+                } else {
+                    if ft.is_symlink() {
+                        if d.exists() { remove_file(&d)?; }
+                        symlink(fs::read_link(&s)?, &d)?;
+                    } else if ft.is_char_device() || ft.is_block_device() || ft.is_fifo() {
+                        if d.exists() { remove_file(&d)?; }
+                        make_device_node(&d, metadata.permissions().mode(), metadata.rdev())?;
+                    } else {
+                        reflink_or_copy(&s, &d)?;
+                    }
+                    
+                    // 同步属性
+                    let _ = copy_extended_attributes(&s, &d);
+                    if repair { let _ = apply_system_context(&d, &next_rel); }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn native_cp_r(src: &Path, dst: &Path, relative: &Path, repair: bool) -> Result<()> {
     if !dst.exists() {
         if src.is_dir() {
