@@ -510,27 +510,29 @@ fn iterative_sync(src: &Path, dst: &Path, repair: bool) -> Result<()> {
 
 pub fn detect_all_partitions() -> Result<Vec<String>> {
     let mut partitions = Vec::new();
-    let mountinfo = procfs::process::Process::myself()?.mountinfo()?;
+    let mountinfo = procfs::process::Process::myself()?.mountinfo()
+        .context("Failed to read mountinfo")?;
 
-    // 定义需要排除的非系统分区前缀
+    // 需要排除的非系统路径
     let excludes = ["/data", "/dev", "/proc", "/sys", "/mnt", "/storage", "/apex"];
 
     for mnt in mountinfo.0 {
-        let path = mnt.mount_point.to_string_lossy();
-        let fstype = mnt.fs_type.to_string_lossy();
-
-        // 逻辑：必须是根目录下的第一级目录，且文件系统属于物理分区类型
-        if path.starts_with('/') && path.split('/').count() == 2 {
-            let name = path.trim_start_matches('/');
+        let path_buf = &mnt.mount_point;
+        let path_str = path_buf.to_string_lossy();
+        
+        // 逻辑：必须是根目录下的第一级目录 (例如 /vendor, /product)
+        if path_str.starts_with('/') && path_str.split('/').count() == 2 {
+            let name = path_str.trim_start_matches('/');
             if name.is_empty() { continue; }
 
-            // 过滤掉不需要的路径
-            if excludes.iter().any(|&ex| path.starts_with(ex)) {
+            if excludes.iter().any(|&ex| path_str.starts_with(ex)) {
                 continue;
             }
 
-            // 只接受常见的物理分区文件系统
-            match fstype.as_ref() {
+            // 修复点：mnt.fs_type 已经是 String，直接引用即可
+            let fstype = &mnt.fs_type;
+
+            match fstype.as_str() {
                 "ext4" | "erofs" | "f2fs" => {
                     partitions.push(name.to_string());
                 }
