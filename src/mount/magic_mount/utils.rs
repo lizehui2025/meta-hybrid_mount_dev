@@ -1,4 +1,4 @@
-// Copyright 2025 Meta-Hybrid Mount Authors
+// Copyright 2026 Hybrid Mount Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, Context};
 use rustix::{
     fs::{Gid, Mode, Uid, chmod, chown},
     mount::mount_bind,
@@ -17,9 +17,10 @@ use rustix::{
 use crate::{
     defs::{DISABLE_FILE_NAME, REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME},
     mount::node::Node,
-    utils::{lgetfilecon, lsetfilecon, validate_module_id},
+    utils::{lgetfilecon, lsetfilecon, validate_module_id, detect_all_partitions},
 };
 
+/// 获取元数据和路径参考
 fn metadata_path<P>(path: P, node: &Node) -> Result<(Metadata, PathBuf)>
 where
     P: AsRef<Path>,
@@ -34,6 +35,8 @@ where
     }
 }
 
+/// 构建 tmpfs 骨架并同步 SELinux 标签
+/// 这是防止字体模块等关键组件 Bootloop 的核心逻辑
 pub fn tmpfs_skeleton<P>(path: P, work_dir_path: P, node: &Node) -> Result<()>
 where
     P: AsRef<Path>,
@@ -60,8 +63,8 @@ where
     chmod(work_dir_path, Mode::from_raw_mode(metadata.mode()))?;
     chown(work_dir_path, Some(Uid::from_raw(metadata.uid())), Some(Gid::from_raw(metadata.gid())))?;
 
-    // 同步 SELinux 标签：解决“不及预期”的关键
-    // 如果是系统目录，确保它不带有 ksu_file 或 unlabeled 标签
+    // 关键：同步 SELinux 标签
+    // 确保 tmpfs 目录不被标记为 ksu_file，否则系统进程无法读取
     if let Ok(ctx) = lgetfilecon(&ref_path) {
         lsetfilecon(work_dir_path, &ctx).ok();
     }
@@ -69,6 +72,7 @@ where
     Ok(())
 }
 
+/// 递归镜像系统文件到 tmpfs 视图
 pub fn mount_mirror<P>(path: P, work_dir_path: P, entry: &DirEntry) -> Result<()>
 where
     P: AsRef<Path>,
@@ -78,9 +82,14 @@ where
     let file_type = entry.file_type()?;
 
     if file_type.is_file() {
-        // 创建空文件作为挂载点
+        // 创建空文件作为挂载点并执行绑定挂载
         fs::File::create(&dst)?;
         mount_bind(&src, &dst)?;
+        
+        // 同步标签：防止被镜像的系统文件因 tmpfs 默认标签而被拒绝访问
+        if let Ok(ctx) = lgetfilecon(&src) {
+            lsetfilecon(&dst, &ctx).ok();
+        }
     } else if file_type.is_dir() {
         create_dir(&dst)?;
         let metadata = entry.metadata()?;
@@ -102,117 +111,74 @@ where
     Ok(())
 }
 
+/// 动态收集模块文件并构建节点树
+/// 移除硬编码，改用 detect_all_partitions 进行动态探测
 pub fn collect_module_files(
     module_dir: &Path,
-    extra_partitions: &[String],
+    user_extra_partitions: &[String],
     need_id: HashSet<String>,
 ) -> Result<Option<Node>> {
     let mut root = Node::new_root("");
     let mut system = Node::new_root("system");
-    let module_root = module_dir;
     let mut has_file = HashSet::new();
 
-    log::debug!("begin collect module files: {}", module_root.display());
+    // 1. 动态获取系统当前所有分区列表
+    let mut all_partitions = detect_all_partitions().unwrap_or_default();
+    all_partitions.extend(user_extra_partitions.iter().cloned());
+    all_partitions.sort();
+    all_partitions.dedup();
 
-    for entry in module_root.read_dir()?.flatten() {
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
+    log::debug!("Dynamic partition detection result: {:?}", all_partitions);
 
-        let id = entry.file_name().to_str().unwrap().to_string();
-        log::debug!("processing new module: {id}");
+    for entry in module_dir.read_dir()?.flatten() {
+        if !entry.file_type()?.is_dir() { continue; }
 
-        if !need_id.contains(&id) {
-            log::debug!("module {id} was blocked.");
-            continue;
-        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !need_id.contains(&id) { continue; }
 
         let prop = entry.path().join("module.prop");
-        if !prop.exists() {
-            log::debug!("skipped module {id}, because not found module.prop");
-            continue;
-        }
-        let string = fs::read_to_string(prop)?;
-        for line in string.lines() {
-            if line.starts_with("id")
-                && let Some((_, value)) = line.split_once('=')
-            {
-                validate_module_id(value)?;
-            }
-        }
+        if !prop.exists() { continue; }
 
+        // 排除禁用、移除、跳过挂载的模块
         if entry.path().join(DISABLE_FILE_NAME).exists()
             || entry.path().join(REMOVE_FILE_NAME).exists()
             || entry.path().join(SKIP_MOUNT_FILE_NAME).exists()
         {
-            log::debug!("skipped module {id}, due to disable/remove/skip_mount");
             continue;
         }
 
+        // 2. 检查模块是否修改了任何探测到的分区
         let mut modified = false;
-        let mut partitions = HashSet::new();
-        partitions.insert("system".to_string());
-        partitions.extend(extra_partitions.iter().cloned());
-
-        for p in &partitions {
+        for p in &all_partitions {
             if entry.path().join(p).is_dir() {
                 modified = true;
                 break;
             }
-            log::debug!("{id} due not modify {p}");
         }
 
-        if !modified {
-            continue;
-        }
+        if !modified { continue; }
 
-        log::debug!("collecting {}", entry.path().display());
-
-        for p in partitions {
-            if !entry.path().join(&p).exists() {
-                continue;
-            }
-
-            has_file.insert(system.collect_module_files(entry.path().join(&p))?);
+        // 3. 将模块修改的文件收集到虚拟 system 节点中
+        for p in &all_partitions {
+            let part_path = entry.path().join(p);
+            if !part_path.exists() { continue; }
+            has_file.insert(system.collect_module_files(part_path)?);
         }
     }
 
     if has_file.contains(&true) {
-        const BUILTIN_PARTITIONS: [(&str, bool); 4] = [
-            ("vendor", true),
-            ("system_ext", true),
-            ("product", true),
-            ("odm", false),
-        ];
+        // 4. 将独立物理分区从 system 节点移动到 root 节点
+        for partition in all_partitions {
+            if partition == "system" { continue; }
 
-        for (partition, require_symlink) in BUILTIN_PARTITIONS {
-            let path_of_root = Path::new("/").join(partition);
-            let path_of_system = Path::new("/system").join(partition);
-            if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
-                let name = partition.to_string();
-                if let Some(node) = system.children.remove(&name) {
-                    root.children.insert(name, node);
-                }
-            }
-        }
+            let path_of_root = Path::new("/").join(&partition);
+            let path_of_system = Path::new("/system").join(&partition);
 
-        for partition in extra_partitions {
-            if BUILTIN_PARTITIONS.iter().any(|(p, _)| p == partition) {
-                continue;
-            }
-            if partition == "system" {
-                continue;
-            }
-
-            let path_of_root = Path::new("/").join(partition);
-            let path_of_system = Path::new("/system").join(partition);
-            let require_symlink = false;
-
-            if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
-                let name = partition.clone();
-                if let Some(node) = system.children.remove(&name) {
-                    log::debug!("attach extra partition '{name}' to root");
-                    root.children.insert(name, node);
+            // 如果该分区挂载在根目录，且在 /system 下是软链接或不存在，则它是一个独立分区
+            if path_of_root.is_dir() && (!path_of_system.exists() || path_of_system.is_symlink()) {
+                if let Some(node) = system.children.remove(&partition) {
+                    log::debug!("Detaching partition '{}' from system and attaching to root", partition);
+                    root.children.insert(partition, node);
                 }
             }
         }
@@ -224,6 +190,7 @@ pub fn collect_module_files(
     }
 }
 
+/// 镜像软链接并还原其标签
 pub fn clone_symlink<S>(src: S, dst: S) -> Result<()>
 where
     S: AsRef<Path>,
@@ -234,7 +201,7 @@ where
     let link_target = read_link(src_path)?;
     symlink(&link_target, dst_path)?;
     
-    // 还原软链接本身的标签
+    // 软链接也需要同步 SELinux 上下文以满足系统的严格检查
     if let Ok(ctx) = lgetfilecon(src_path) {
         lsetfilecon(dst_path, &ctx).ok();
     }
