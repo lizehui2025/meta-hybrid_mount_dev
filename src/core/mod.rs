@@ -86,36 +86,19 @@ impl MountController<Init> {
 }
 
 impl MountController<StorageReady> {
-    pub fn scan_and_sync(mut self) -> Result<MountController<ModulesReady>> {
+    pub fn scan_and_sync(self) -> Result<MountController<ModulesReady>> {
         let modules = inventory::scan(&self.config.moduledir, &self.config)?;
 
-        log::info!(
-            ">> Inventory Scan: Found {} enabled modules.",
-            modules.len()
-        );
-
-        // --- 核心修改：模式变更检测 ---
-        // 加载上次运行的状态记录
-        let prev_state = state::RuntimeState::load().unwrap_or_default();
+        // 核心变更：在瞬时模式下，force_sync 永远为 true
+        log::info!(">> Workspace is transient. Performing full module sync...");
         
-        // 检查存储模式是否发生变化 (例如 ext4 -> tmpfs)
-        // 如果 prev_state.storage_mode 为空（首次运行），通常不需要强制同步
-        let mut force_sync = false;
-        if !prev_state.storage_mode.is_empty() && prev_state.storage_mode != self.state.handle.mode {
-            log::warn!(">> Storage mode change detected: {} -> {}. Forcing clean sync.", 
-                prev_state.storage_mode, self.state.handle.mode);
-            force_sync = true;
-        }
+        sync::perform_sync(
+            &modules, 
+            &self.state.handle.mount_point, 
+            true // 强制同步，因为工作区每次都是空的
+        )?;
 
-        // 检查挂载模式配置是否可能导致不一致
-        // 如果上次运行有 Magic 模块而这次配置禁用了 Magic，或者反之，建议强制同步
-        // 这里简化处理：只要存储后端变了就强刷
-        
-        sync::perform_sync(&modules, &self.state.handle.mount_point, force_sync)?;
-        // -----------------------------
-
-        self.state.handle.commit(self.config.disable_umount)?;
-
+        // 不再提交存储（commit），因为没有持久化镜像需要同步磁盘
         Ok(MountController {
             config: self.config,
             state: ModulesReady {
