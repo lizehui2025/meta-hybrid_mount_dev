@@ -1,15 +1,16 @@
 // Copyright 2025 Meta-Hybrid Mount Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pub const DEFAULT_HYBRID_MNT_DIR: &str = "/debug_ramdisk";
-pub const WORKSPACE_MNT: &str = "/mnt/vendor/meta-hybrid"; 
-pub const SYSTEM_RW_DIR: &str = "/dev/meta-hybrid/upper";
-pub const RUN_DIR: &str = "/data/adb/meta-hybrid/run/";
-pub const STATE_FILE: &str = "/data/adb/meta-hybrid/run/daemon_state.json";
+pub const DEFAULT_HYBRID_MNT_DIR: &str = "/mnt/vendor/meta-hybrid";
+pub const RUN_DIR: &str = "/dev/meta-hybrid/run/";
+pub const STATE_FILE: &str = "/dev/meta-hybrid/run/daemon_state.json";
 pub const DISABLE_FILE_NAME: &str = "disable";
 pub const REMOVE_FILE_NAME: &str = "remove";
 pub const SKIP_MOUNT_FILE_NAME: &str = "skip_mount";
-pub const SYSTEM_RW_DIR: &str = "/data/adb/meta-hybrid/rw";
+
+// 统一使用 /dev 下的目录作为 Overlay 的 RW 支撑
+pub const SYSTEM_RW_DIR: &str = "/dev/meta-hybrid/rw";
+
 pub const MODULE_PROP_FILE: &str = "/data/adb/modules/meta-hybrid/module.prop";
 pub const MODULES_DIR: &str = "/data/adb/modules";
 
