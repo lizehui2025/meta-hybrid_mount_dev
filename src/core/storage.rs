@@ -17,7 +17,12 @@ use serde::Serialize;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::try_umount::send_umountable;
-use crate::{core::state::RuntimeState, mount::overlayfs::utils as overlay_utils, utils};
+use crate::{
+    conf::config::{Config, OverlayMode},
+    core::state::RuntimeState,
+    mount::overlayfs::utils as overlay_utils,
+    utils,
+};
 
 const DEFAULT_SELINUX_CONTEXT: &str = "u:object_r:system_file:s0";
 
@@ -119,15 +124,78 @@ where
     Ok(())
 }
 
-pub fn setup(
-    mnt_base: &Path,
-    img_path: &Path,
-    moduledir: &Path,
-    force_ext4: bool,
-    use_erofs: bool,
-    mount_source: &str,
-    disable_umount: bool,
-) -> Result<StorageHandle> {
+/// 验证关键配置是否发生变更，如果变更则清理旧的镜像文件
+fn validate_config_change(img_path: &Path, config: &Config) -> Result<()> {
+    // 定义一个仅包含影响存储结构的关键字段的结构体
+    #[derive(Serialize)]
+    struct Validate<'a> {
+        moduledir: &'a PathBuf,
+        mountsource: &'a String,
+        partitions: &'a Vec<String>,
+        overlay_mode: &'a OverlayMode,
+        hybrid_mnt_dir: &'a String,
+    }
+
+    let val = Validate {
+        moduledir: &config.moduledir,
+        mountsource: &config.mountsource,
+        partitions: &config.partitions,
+        overlay_mode: &config.overlay_mode,
+        hybrid_mnt_dir: &config.hybrid_mnt_dir,
+    };
+
+    let meta_file = img_path.with_extension("meta");
+    let current_str =
+        toml::to_string(&val).context("Failed to serialize config for validation")?;
+
+    let mut config_changed = true;
+
+    if meta_file.exists() {
+        let old_str = fs::read_to_string(&meta_file).unwrap_or_default();
+        if old_str == current_str {
+            config_changed = false;
+        }
+    }
+
+    if config_changed {
+        if meta_file.exists() {
+            log::info!("Configuration changed. Cleaning up old storage to prevent pollution...");
+        } else {
+            log::info!("No storage metadata found. Initializing new storage...");
+        }
+
+        // 清理旧的 ext4 镜像
+        if img_path.exists() {
+            fs::remove_file(img_path).context("Failed to remove old image")?;
+        }
+
+        // 清理旧的 erofs 镜像
+        let erofs_path = img_path.with_extension("erofs");
+        if erofs_path.exists() {
+            fs::remove_file(erofs_path).ok();
+        }
+
+        // 写入新的元数据
+        fs::write(&meta_file, current_str).context("Failed to write config metadata")?;
+    } else {
+        log::debug!("Storage configuration matches. Reusing existing storage.");
+    }
+
+    Ok(())
+}
+
+pub fn setup(config: &Config, img_path: &Path) -> Result<StorageHandle> {
+    // 1. 首先验证配置，必要时清理旧文件
+    validate_config_change(img_path, config)?;
+
+    // 2. 从 Config 中提取需要的参数
+    let mnt_base = Path::new(&config.hybrid_mnt_dir);
+    let moduledir = &config.moduledir;
+    let force_ext4 = config.overlay_mode == OverlayMode::Ext4;
+    let use_erofs = config.overlay_mode == OverlayMode::Erofs;
+    let mount_source = &config.mountsource;
+    let disable_umount = config.disable_umount;
+
     if utils::is_mounted(mnt_base) {
         let _ = umount(mnt_base, UnmountFlags::DETACH);
     }
