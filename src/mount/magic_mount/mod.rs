@@ -174,6 +174,7 @@ impl MagicMount {
         let has_tmpfs = tmpfs || self.has_tmpfs;
 
         if has_tmpfs {
+            // 如果创建目录骨架失败，这通常是致命的，保持 '?'
             utils::tmpfs_skeleton(&self.path, &self.work_dir_path, &self.node)?;
         }
 
@@ -220,11 +221,12 @@ impl MagicMount {
             }
             .with_context(|| format!("magic mount {}/{name}", self.path.display()))
             {
-                if has_tmpfs {
-                    return Err(e);
-                }
-
-                log::error!("mount child {}/{name} failed: {e:#?}", self.path.display());
+                // 修复：将之前的 'return Err(e)' 改为仅记录日志
+                // 这样即使单个文件挂载失败，也不会中断整个目录的处理
+                log::warn!(
+                    "mount child {}/{name} failed: {e:#?}. Skipping...",
+                    self.path.display()
+                );
             }
         }
 
@@ -291,10 +293,12 @@ impl MagicMount {
             };
 
             if let Err(e) = result {
-                if has_tmpfs {
-                    return Err(e);
-                }
-                log::error!("mount child {}/{name} failed: {e:#?}", self.path.display());
+                // 修复：移除 'if has_tmpfs { return Err(e); }'
+                // 改为记录警告并继续处理下一个文件
+                log::warn!(
+                    "mount child {}/{name} failed: {e:#?}. Skipping...",
+                    self.path.display()
+                );
             }
         }
 
@@ -328,6 +332,7 @@ where
             let _ = send_umountable(&tmp_dir);
         }
 
+        // 这里是根入口，如果根目录处理失败（例如 tmpfs 骨架都无法创建），我们才让它报错
         let ret = MagicMount::new(
             &root,
             Path::new("/"),
