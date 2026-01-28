@@ -55,27 +55,20 @@ impl MountController<Init> {
         }
     }
 
-    pub fn init_storage(
-        self,
-        mnt_base: &Path,
+pub fn init_storage(
+        mut self,
+        _mnt_base: &Path, // 记得加下划线避免警告
         img_path: &Path,
     ) -> Result<MountController<StorageReady>> {
-    let handle = storage::setup(&self.config, img_path)?;
-            matches!(
-                self.config.overlay_mode,
-                crate::conf::config::OverlayMode::Erofs
-            ),
-            &self.config.mountsource,
-            self.config.disable_umount,
-        )?;
-
+        // --- 修改开始 ---
+        // 1. 确保这一行是新的调用方式
+        let handle = storage::setup(&self.config, img_path)?;
         log::info!(">> Storage Backend: [{}]", handle.mode.to_uppercase());
 
         Ok(MountController {
             config: self.config,
             state: StorageReady { handle },
         })
-    }
 }
 
 impl MountController<StorageReady> {
