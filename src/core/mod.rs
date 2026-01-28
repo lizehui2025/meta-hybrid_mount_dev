@@ -50,25 +50,25 @@ pub struct MountController<S> {
 impl MountController<Init> {
     pub fn new(config: Config) -> Self {
         Self {
-            config,
             state: Init,
+            config,
         }
     }
 
-pub fn init_storage(
-        mut self,
-        _mnt_base: &Path, // 记得加下划线避免警告
+    pub fn init_storage(
+        self,
+        _mnt_base: &Path,
         img_path: &Path,
     ) -> Result<MountController<StorageReady>> {
-        // --- 修改开始 ---
-        // 1. 确保这一行是新的调用方式
+        // 调用修改后的 setup 函数，只传 config 和 img_path
         let handle = storage::setup(&self.config, img_path)?;
-        log::info!(">> Storage Backend: [{}]", handle.mode.to_uppercase());
 
+        // 返回新的状态
         Ok(MountController {
-            config: self.config,
             state: StorageReady { handle },
+            config: self.config,
         })
+    }
 }
 
 impl MountController<StorageReady> {
