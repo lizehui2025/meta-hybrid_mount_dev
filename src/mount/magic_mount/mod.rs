@@ -1,361 +1,316 @@
-// Copyright 2026 Hybrid Mount Authors
+// Copyright 2025 Meta-Hybrid Mount Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
-
-mod utils;
 
 use std::{
     collections::HashSet,
-    fs,
+    fs::{self, DirEntry, Metadata, create_dir, create_dir_all, read_link},
+    os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
-    sync::atomic::AtomicU32,
 };
 
-use anyhow::{Context, Result, bail};
-use rustix::mount::{
-    MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change, mount_move,
-    mount_remount, unmount,
+use anyhow::{Result, bail};
+use rustix::{
+    fs::{Gid, Mode, Uid, chmod, chown},
+    mount::mount_bind,
 };
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use crate::try_umount::send_umountable;
 use crate::{
-    mount::{
-        magic_mount::utils::{clone_symlink, collect_module_files, mount_mirror},
-        node::{Node, NodeFileType},
-    },
-    try_umount,
-    utils::ensure_dir_exists,
+    defs::{DISABLE_FILE_NAME, REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME},
+    mount::node::Node,
+    utils::{lgetfilecon, lsetfilecon, validate_module_id},
 };
 
-static MOUNTED_FILES: AtomicU32 = AtomicU32::new(0);
-static MOUNTED_SYMBOLS_FILES: AtomicU32 = AtomicU32::new(0);
-
-struct MagicMount {
-    node: Node,
-    path: PathBuf,
-    work_dir_path: PathBuf,
-    has_tmpfs: bool,
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    umount: bool,
-}
-
-impl MagicMount {
-    fn new<P>(
-        node: &Node,
-        path: P,
-        work_dir_path: P,
-        has_tmpfs: bool,
-        #[cfg(any(target_os = "linux", target_os = "android"))] umount: bool,
-    ) -> Self
-    where
-        P: AsRef<Path>,
-    {
-        Self {
-            node: node.clone(),
-            path: path.as_ref().join(node.name.clone()),
-            work_dir_path: work_dir_path.as_ref().join(node.name.clone()),
-            has_tmpfs,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            umount,
-        }
-    }
-
-    fn do_mount(&mut self) -> Result<()> {
-        match self.node.file_type {
-            NodeFileType::Symlink => self.symlink(),
-            NodeFileType::RegularFile => self.regular_file(),
-            NodeFileType::Directory => self.directory(),
-            NodeFileType::Whiteout => {
-                log::debug!("file {} is removed", self.path.display());
-                Ok(())
-            }
-        }
-    }
-}
-
-impl MagicMount {
-    fn symlink(&self) -> Result<()> {
-        if let Some(module_path) = &self.node.module_path {
-            log::debug!(
-                "create module symlink {} -> {}",
-                module_path.display(),
-                self.work_dir_path.display()
-            );
-            clone_symlink(module_path, &self.work_dir_path).with_context(|| {
-                format!(
-                    "create module symlink {} -> {}",
-                    module_path.display(),
-                    self.work_dir_path.display(),
-                )
-            })?;
-            let mounted = MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed) + 1;
-            MOUNTED_SYMBOLS_FILES.store(mounted, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        } else {
-            bail!("cannot mount root symlink {}!", self.path.display());
-        }
-    }
-
-    fn regular_file(&self) -> Result<()> {
-        let target = if self.has_tmpfs {
-            fs::File::create(&self.work_dir_path)?;
-            &self.work_dir_path
-        } else {
-            &self.path
-        };
-
-        if self.node.module_path.is_none() {
-            bail!("cannot mount root file {}!", self.path.display());
-        }
-
-        let module_path = &self.node.module_path.clone().unwrap();
-
-        log::debug!(
-            "mount module file {} -> {}",
-            module_path.display(),
-            self.work_dir_path.display()
-        );
-
-        mount_bind(module_path, target).with_context(|| {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            if self.umount {
-                let _ = send_umountable(target);
-            }
-            format!(
-                "mount module file {} -> {}",
-                module_path.display(),
-                self.work_dir_path.display(),
-            )
-        })?;
-
-        if let Err(e) = mount_remount(target, MountFlags::RDONLY | MountFlags::BIND, "") {
-            log::warn!("make file {} ro: {e:#?}", target.display());
-        }
-
-        let mounted = MOUNTED_FILES.load(std::sync::atomic::Ordering::Relaxed) + 1;
-        MOUNTED_FILES.store(mounted, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn directory(&mut self) -> Result<()> {
-        let mut tmpfs = !self.has_tmpfs && self.node.replace && self.node.module_path.is_some();
-
-        if !self.has_tmpfs && !tmpfs {
-            for it in &mut self.node.children {
-                let (name, node) = it;
-                let real_path = self.path.join(name);
-                let need = match node.file_type {
-                    NodeFileType::Symlink => true,
-                    NodeFileType::Whiteout => real_path.exists(),
-                    _ => {
-                        if let Ok(metadata) = real_path.symlink_metadata() {
-                            let file_type = NodeFileType::from(metadata.file_type());
-                            file_type != self.node.file_type || file_type == NodeFileType::Symlink
-                        } else {
-                            true
-                        }
-                    }
-                };
-                if need {
-                    if self.node.module_path.is_none() {
-                        log::error!(
-                            "cannot create tmpfs on {}, ignore: {name}",
-                            self.path.display()
-                        );
-                        node.skip = true;
-                        continue;
-                    }
-                    tmpfs = true;
-                    break;
-                }
-            }
-        }
-        let has_tmpfs = tmpfs || self.has_tmpfs;
-
-        if has_tmpfs {
-            // 如果创建目录骨架失败，这通常是致命的，保持 '?'
-            utils::tmpfs_skeleton(&self.path, &self.work_dir_path, &self.node)?;
-        }
-
-        if tmpfs {
-            mount_bind(&self.work_dir_path, &self.work_dir_path).with_context(|| {
-                format!(
-                    "creating tmpfs for {} at {}",
-                    self.path.display(),
-                    self.work_dir_path.display(),
-                )
-            })?;
-        }
-
-        if self.path.exists() && !self.node.replace {
-            self.mount_path(has_tmpfs)?;
-        }
-
-        if self.node.replace {
-            if self.node.module_path.is_none() {
-                bail!(
-                    "dir {} is declared as replaced but it is root!",
-                    self.path.display()
-                );
-            }
-
-            log::debug!("dir {} is replaced", self.path.display());
-        }
-
-        for (name, node) in &self.node.children {
-            if node.skip {
-                continue;
-            }
-
-            if let Err(e) = {
-                Self::new(
-                    node,
-                    &self.path,
-                    &self.work_dir_path,
-                    has_tmpfs,
-                    #[cfg(any(target_os = "linux", target_os = "android"))]
-                    self.umount,
-                )
-                .do_mount()
-            }
-            .with_context(|| format!("magic mount {}/{name}", self.path.display()))
-            {
-                // 修复：将之前的 'return Err(e)' 改为仅记录日志
-                // 这样即使单个文件挂载失败，也不会中断整个目录的处理
-                log::warn!(
-                    "mount child {}/{name} failed: {e:#?}. Skipping...",
-                    self.path.display()
-                );
-            }
-        }
-
-        if tmpfs {
-            log::debug!(
-                "moving tmpfs {} -> {}",
-                self.work_dir_path.display(),
-                self.path.display()
-            );
-
-            if let Err(e) = mount_remount(
-                &self.work_dir_path,
-                MountFlags::RDONLY | MountFlags::BIND,
-                "",
-            ) {
-                log::warn!("make dir {} ro: {e:#?}", self.path.display());
-            }
-            mount_move(&self.work_dir_path, &self.path).with_context(|| {
-                format!(
-                    "moving tmpfs {} -> {}",
-                    self.work_dir_path.display(),
-                    self.path.display()
-                )
-            })?;
-            if let Err(e) = mount_change(&self.path, MountPropagationFlags::PRIVATE) {
-                log::warn!("make dir {} private: {e:#?}", self.path.display());
-            }
-
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            if self.umount {
-                let _ = send_umountable(&self.path);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl MagicMount {
-    fn mount_path(&mut self, has_tmpfs: bool) -> Result<()> {
-        for entry in self.path.read_dir()?.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let result = {
-                if let Some(node) = self.node.children.remove(&name) {
-                    if node.skip {
-                        continue;
-                    }
-
-                    Self::new(
-                        &node,
-                        &self.path,
-                        &self.work_dir_path,
-                        has_tmpfs,
-                        #[cfg(any(target_os = "linux", target_os = "android"))]
-                        self.umount,
-                    )
-                    .do_mount()
-                    .with_context(|| format!("magic mount {}/{name}", self.path.display()))
-                } else if has_tmpfs {
-                    mount_mirror(&self.path, &self.work_dir_path, &entry)
-                        .with_context(|| format!("mount mirror {}/{name}", self.path.display()))
-                } else {
-                    Ok(())
-                }
-            };
-
-            if let Err(e) = result {
-                // 修复：移除 'if has_tmpfs { return Err(e); }'
-                // 改为记录警告并继续处理下一个文件
-                log::warn!(
-                    "mount child {}/{name} failed: {e:#?}. Skipping...",
-                    self.path.display()
-                );
-            }
-        }
-
-        Ok(())
-    }
-}
-
-pub fn magic_mount<P>(
-    tmp_path: P,
-    module_dir: &Path,
-    mount_source: &str,
-    extra_partitions: &[String],
-    need_id: HashSet<String>,
-    #[cfg(any(target_os = "linux", target_os = "android"))] umount: bool,
-    #[cfg(not(any(target_os = "linux", target_os = "android")))] _umount: bool,
-) -> Result<()>
+fn metadata_path<P>(path: P, node: &Node) -> Result<(Metadata, PathBuf)>
 where
     P: AsRef<Path>,
 {
-    if let Some(root) = collect_module_files(module_dir, extra_partitions, need_id)? {
-        log::debug!("collected: {root:?}");
-        let tmp_root = tmp_path.as_ref();
-        let tmp_dir = tmp_root.join("workdir");
-        ensure_dir_exists(&tmp_dir)?;
-
-        mount(mount_source, &tmp_dir, "tmpfs", MountFlags::empty(), None).context("mount tmp")?;
-        mount_change(&tmp_dir, MountPropagationFlags::PRIVATE).context("make tmp private")?;
-
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        if umount {
-            let _ = send_umountable(&tmp_dir);
-        }
-
-        // 这里是根入口，如果根目录处理失败（例如 tmpfs 骨架都无法创建），我们才让它报错
-        let ret = MagicMount::new(
-            &root,
-            Path::new("/"),
-            tmp_dir.as_path(),
-            false,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            umount,
-        )
-        .do_mount();
-
-        if let Err(e) = unmount(&tmp_dir, UnmountFlags::DETACH) {
-            log::error!("failed to unmount tmp {e}");
-        }
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        try_umount::commit()?;
-        fs::remove_dir(tmp_dir).ok();
-
-        let mounted_symbols = MOUNTED_SYMBOLS_FILES.load(std::sync::atomic::Ordering::Relaxed);
-        let mounted_files = MOUNTED_FILES.load(std::sync::atomic::Ordering::Relaxed);
-        log::info!("mounted files: {mounted_files}, mounted symlinks: {mounted_symbols}");
-        ret
+    let path = path.as_ref();
+    if path.exists() {
+        Ok((path.metadata()?, path.to_path_buf()))
+    } else if let Some(module_path) = &node.module_path {
+        Ok((module_path.metadata()?, module_path.clone()))
     } else {
-        log::info!("no modules to mount, skipping!");
-        Ok(())
+        bail!("cannot mount root dir {}!", path.display());
     }
+}
+
+pub fn tmpfs_skeleton<P>(path: P, work_dir_path: P, node: &Node) -> Result<()>
+where
+    P: AsRef<Path>,
+{
+    let (path, work_dir_path) = (path.as_ref(), work_dir_path.as_ref());
+    log::debug!(
+        "creating tmpfs skeleton for {} at {}",
+        path.display(),
+        work_dir_path.display()
+    );
+
+    create_dir_all(work_dir_path)?;
+
+    let (metadata, path) = metadata_path(path, node)?;
+
+    chmod(work_dir_path, Mode::from_raw_mode(metadata.mode()))?;
+    chown(
+        work_dir_path,
+        Some(Uid::from_raw(metadata.uid())),
+        Some(Gid::from_raw(metadata.gid())),
+    )?;
+    lsetfilecon(work_dir_path, lgetfilecon(path)?.as_str())?;
+
+    Ok(())
+}
+
+pub fn mount_mirror<P>(path: P, work_dir_path: P, entry: &DirEntry) -> Result<()>
+where
+    P: AsRef<Path>,
+{
+    let file_name = entry.file_name();
+    let path = path.as_ref().join(&file_name);
+    let work_dir_path = work_dir_path.as_ref().join(&file_name);
+    
+    // 获取文件类型，如果失败则跳过该文件
+    let file_type = match entry.file_type() {
+        Ok(ft) => ft,
+        Err(e) => {
+            log::warn!("Skipping {}: failed to get file type: {}", path.display(), e);
+            return Ok(());
+        }
+    };
+
+    if file_type.is_file() {
+        log::debug!(
+            "mount mirror file {} -> {}",
+            path.display(),
+            work_dir_path.display()
+        );
+        // 使用闭包捕获错误，防止单个文件挂载失败中断整个流程
+        if let Err(e) = fs::File::create(&work_dir_path)
+            .and_then(|_| mount_bind(&path, &work_dir_path).map_err(std::io::Error::from)) 
+        {
+            log::warn!("Failed to mount mirror file {}: {}. Skipping...", path.display(), e);
+        }
+    } else if file_type.is_dir() {
+        log::debug!(
+            "mount mirror dir {} -> {}",
+            path.display(),
+            work_dir_path.display()
+        );
+        
+        // 创建目录如果失败，则无法处理子项，必须终止该分支，但返回 Ok 以保护兄弟分支
+        if let Err(e) = create_dir(&work_dir_path) {
+             log::warn!("Failed to create mirror dir {}: {}. Skipping subtree...", work_dir_path.display(), e);
+             return Ok(());
+        }
+
+        // 尝试设置权限，失败仅记录警告
+        if let Ok(metadata) = entry.metadata() {
+            let _ = chmod(&work_dir_path, Mode::from_raw_mode(metadata.mode()));
+            let _ = chown(
+                &work_dir_path,
+                Some(Uid::from_raw(metadata.uid())),
+                Some(Gid::from_raw(metadata.gid())),
+            );
+        }
+        
+        // 尝试设置 SELinux 上下文
+        if let Ok(ctx) = lgetfilecon(&path) {
+            let _ = lsetfilecon(&work_dir_path, ctx.as_str());
+        }
+
+        // 递归处理子目录，捕获 readdir 错误
+        match path.read_dir() {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    // 关键修复：递归调用时捕获错误，不要让 '?' 传播
+                    if let Err(e) = mount_mirror(&path, &work_dir_path, &entry) {
+                        log::warn!(
+                            "Failed to mirror entry {:?}: {}. Skipping...", 
+                            entry.file_name(), 
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to read dir {}: {}. Skipping children...", path.display(), e);
+            }
+        }
+    } else if file_type.is_symlink() {
+        log::debug!(
+            "create mirror symlink {} -> {}",
+            path.display(),
+            work_dir_path.display()
+        );
+        if let Err(e) = clone_symlink(&path, &work_dir_path) {
+            log::warn!("Failed to clone symlink {}: {}. Skipping...", path.display(), e);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn collect_module_files(
+    module_dir: &Path,
+    extra_partitions: &[String],
+    need_id: HashSet<String>,
+) -> Result<Option<Node>> {
+    let mut root = Node::new_root("");
+    let mut system = Node::new_root("system");
+    let module_root = module_dir;
+    let mut has_file = HashSet::new();
+
+    log::debug!("begin collect module files: {}", module_root.display());
+
+    for entry in module_root.read_dir()?.flatten() {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let id = entry.file_name().to_string_lossy().to_string();
+        log::debug!("processing new module: {id}");
+
+        if !need_id.contains(&id) {
+            log::debug!("module {id} was blocked.");
+            continue;
+        }
+
+        let prop = entry.path().join("module.prop");
+        if !prop.exists() {
+            log::debug!("skipped module {id}, because not found module.prop");
+            continue;
+        }
+        
+        // 修复：读取 module.prop 失败不应导致程序崩溃
+        let string = match fs::read_to_string(&prop) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Failed to read module.prop for {id}: {e}. Skipping module.");
+                continue;
+            }
+        };
+
+        for line in string.lines() {
+            if line.starts_with("id")
+                && let Some((_, value)) = line.split_once('=')
+            {
+                // 校验 ID 失败也不应崩溃
+                if let Err(e) = validate_module_id(value) {
+                    log::warn!("Invalid module ID in {id}: {e}");
+                }
+            }
+        }
+
+        if entry.path().join(DISABLE_FILE_NAME).exists()
+            || entry.path().join(REMOVE_FILE_NAME).exists()
+            || entry.path().join(SKIP_MOUNT_FILE_NAME).exists()
+        {
+            log::debug!("skipped module {id}, due to disable/remove/skip_mount");
+            continue;
+        }
+
+        let mut modified = false;
+        let mut partitions = HashSet::new();
+        partitions.insert("system".to_string());
+        partitions.extend(extra_partitions.iter().cloned());
+
+        for p in &partitions {
+            if entry.path().join(p).is_dir() {
+                modified = true;
+                break;
+            }
+            log::debug!("{id} due not modify {p}");
+        }
+
+        if !modified {
+            continue;
+        }
+
+        log::debug!("collecting {}", entry.path().display());
+
+        for p in partitions {
+            let target_path = entry.path().join(&p);
+            if !target_path.exists() {
+                continue;
+            }
+
+            // 修复：单个模块收集失败不应影响其他模块
+            match system.collect_module_files(target_path) {
+                Ok(files) => {
+                    has_file.insert(files);
+                }
+                Err(e) => {
+                    log::warn!("Failed to collect files for module {id} partition {p}: {e}");
+                    continue;
+                }
+            }
+        }
+    }
+
+    if has_file.contains(&true) {
+        const BUILTIN_PARTITIONS: [(&str, bool); 4] = [
+            ("vendor", true),
+            ("system_ext", true),
+            ("product", true),
+            ("odm", false),
+        ];
+
+        for (partition, require_symlink) in BUILTIN_PARTITIONS {
+            let path_of_root = Path::new("/").join(partition);
+            let path_of_system = Path::new("/system").join(partition);
+            if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
+                let name = partition.to_string();
+                if let Some(node) = system.children.remove(&name) {
+                    root.children.insert(name, node);
+                }
+            }
+        }
+
+        for partition in extra_partitions {
+            if BUILTIN_PARTITIONS.iter().any(|(p, _)| p == partition) {
+                continue;
+            }
+            if partition == "system" {
+                continue;
+            }
+
+            let path_of_root = Path::new("/").join(partition);
+            let path_of_system = Path::new("/system").join(partition);
+            // extra partitions usually act as root directories (like /my_partition)
+            let require_symlink = false;
+
+            if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
+                let name = partition.clone();
+                if let Some(node) = system.children.remove(&name) {
+                    log::debug!("attach extra partition '{name}' to root");
+                    root.children.insert(name, node);
+                }
+            }
+        }
+
+        root.children.insert("system".to_string(), system);
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn clone_symlink<S>(src: S, dst: S) -> Result<()>
+where
+    S: AsRef<Path>,
+{
+    let src_symlink = read_link(src.as_ref())?;
+    symlink(&src_symlink, dst.as_ref())?;
+    
+    // 权限设置失败不应视为致命错误
+    if let Ok(ctx) = lgetfilecon(src.as_ref()) {
+         let _ = lsetfilecon(dst.as_ref(), ctx.as_str());
+    }
+    
+    log::debug!(
+        "clone symlink {} -> {}({})",
+        dst.as_ref().display(),
+        dst.as_ref().display(),
+        src_symlink.display()
+    );
+    Ok(())
 }
